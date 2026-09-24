@@ -9,11 +9,15 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/sorotrail/sorobeacon/internal/metrics"
 	"github.com/sorotrail/sorobeacon/internal/notify"
 	"github.com/sorotrail/sorobeacon/internal/rules"
 	"github.com/sorotrail/sorobeacon/internal/stellar"
 	"github.com/sorotrail/sorobeacon/internal/store"
+	"github.com/sorotrail/sorobeacon/internal/telemetry"
 )
 
 // Position is a race-free snapshot of how far the poller has got relative
@@ -59,6 +63,10 @@ type Poller struct {
 	log      *slog.Logger
 	// metrics is optional instrumentation; nil-safe, see internal/metrics.
 	metrics *metrics.Metrics
+	// telemetry is optional tracing; nil-safe like metrics. When set, every
+	// poll cycle becomes one trace: fetch, decode, rule evaluation, the
+	// alert write and each channel delivery hang off the same root span.
+	telemetry *telemetry.Provider
 	// scanned/matched accumulate per-cycle counts for metrics.
 	scanned int
 	matched int
@@ -104,6 +112,14 @@ func (p *Poller) WithMetrics(m *metrics.Metrics) *Poller {
 	return p
 }
 
+// WithTelemetry attaches tracing to the ingest pipeline. The provider's
+// own disabled state decides whether anything is exported; a nil provider
+// means no spans at all.
+func (p *Poller) WithTelemetry(t *telemetry.Provider) *Poller {
+	p.telemetry = t
+	return p
+}
+
 // Run polls until ctx is cancelled. RPC errors back off exponentially
 // (capped at 10x the poll interval) instead of hammering the node.
 func (p *Poller) Run(ctx context.Context) {
@@ -134,9 +150,25 @@ func (p *Poller) Run(ctx context.Context) {
 	}
 }
 
-// Poll runs one ingest cycle. Exported so tests (and one-shot tools) can
-// drive the poller without the timing loop.
+// Poll runs one ingest cycle as a single trace. The root span
+// (poller.poll) covers the whole cycle; fetch, rule evaluation, the alert
+// write and — via the context the alert's span rides in — every channel
+// delivery hang underneath it, so one late alert is one timeline answering
+// which stage was slow. Exported so tests (and one-shot tools) can drive
+// the poller without the timing loop.
 func (p *Poller) Poll(ctx context.Context) error {
+	if p.telemetry != nil {
+		var span trace.Span
+		ctx, span = p.telemetry.WithRequestID(ctx, "poller.poll")
+		defer func() {
+			telemetry.SetAttrs(span,
+				telemetry.AttrEventsScanned, p.scanned,
+				telemetry.AttrEventsMatched, p.matched,
+			)
+			span.End()
+		}()
+	}
+
 	monitors, err := p.store.ListMonitors(ctx, true)
 	if err != nil {
 		return err
@@ -222,10 +254,32 @@ func (p *Poller) Poll(ctx context.Context) error {
 	tip := uint32(0)        // max latestLedger across pages
 	cursor := ""
 	for {
-		page, err := p.source.FetchEvents(ctx, startLedger, watch, cursor, stellar.DefaultEventsLimit)
+		// One span per page covers both halves of the fetch: the RPC call
+		// (or indexer request) and the local decode of what came back. That
+		// is the "RPC fetch" stage of the slow-alert question; decode time
+		// is inside it by design, since the source owns decoding. The span
+		// ends before handleEvent so pages stay siblings under the cycle
+		// span — otherwise page two would parent to page one.
+		fetchCtx := ctx
+		// NoopSpan keeps the error/End calls below uniform when tracing is
+		// off — a nil interface would panic on End.
+		fetchSpan := telemetry.NoopSpan()
+		if p.telemetry != nil {
+			fetchCtx, fetchSpan = p.telemetry.WithRequestID(ctx, "poller.fetch_events",
+				trace.WithAttributes(
+					attribute.Int(telemetry.AttrStartLedger, int(startLedger)),
+					attribute.Int(telemetry.AttrContractsWatched, len(contracts)),
+				),
+			)
+		}
+		page, err := p.source.FetchEvents(fetchCtx, startLedger, watch, cursor, stellar.DefaultEventsLimit)
 		if err != nil {
+			telemetry.RecordError(fetchSpan, err)
+			fetchSpan.End()
 			return err
 		}
+		fetchSpan.End()
+
 		if page.LatestLedger > 0 && (checkpoint == 0 || page.LatestLedger < checkpoint) {
 			checkpoint = page.LatestLedger
 		}
@@ -260,12 +314,12 @@ func (p *Poller) Poll(ctx context.Context) error {
 	return nil
 }
 
-// pollBatch pages through getEvents for one set of filters, following the
-// cursor until the stream is drained. Returns the node's latestLedger.
 // handleEvent runs every enabled rule of every monitor watching the
 // event's contract. Events arrive already decoded from the source;
 // per-event failures are logged, not fatal: one bad event must not stall
-// ingestion.
+// ingestion. Rule evaluation spans come from the registry, one per rule,
+// each a child of the cycle span, on the same trace as the fetch page that
+// produced the event.
 func (p *Poller) handleEvent(ctx context.Context, decoded *stellar.DecodedEvent, byContract map[string][]store.Monitor) {
 	monitors, watched := byContract[decoded.ContractID]
 	if !watched {
@@ -305,7 +359,25 @@ func (p *Poller) handleEvent(ctx context.Context, decoded *stellar.DecodedEvent,
 // fireAlert persists a deduped, cooldown-gated alert and hands it to the
 // dispatcher. The store owns both gates so they hold across poller instances
 // and restarts; this function only reports the outcome.
+//
+// The alert runs in its own span (poller.create_alert) under the poll
+// cycle; Dispatch is called with that span's context, so every delivery
+// span becomes a child of this alert's span — never a root. That parent
+// chain is what ties one alert's full path into one timeline, and the
+// poller test pins it.
 func (p *Poller) fireAlert(ctx context.Context, m store.Monitor, rule store.Rule, ev *stellar.DecodedEvent, eventID string) {
+	if p.telemetry != nil {
+		var span trace.Span
+		ctx, span = p.telemetry.WithRequestID(ctx, "poller.create_alert",
+			trace.WithAttributes(
+				attribute.Int64(telemetry.AttrMonitorID, m.ID),
+				attribute.Int64(telemetry.AttrRuleID, rule.ID),
+				attribute.String(telemetry.AttrEventID, eventID),
+			),
+		)
+		defer span.End()
+	}
+
 	body := map[string]any{
 		"contract_id":      ev.ContractID,
 		"event_name":       ev.EventName(),

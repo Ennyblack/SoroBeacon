@@ -19,6 +19,10 @@ const (
 	DefaultRPCURL       = "https://soroban-testnet.stellar.org"
 	DefaultPollInterval = 5 * time.Second
 	DefaultHTTPAddr     = ":8080"
+	// DefaultOTLPSampleRate keeps every trace when tracing is enabled.
+	// Sampling is an operator lever for busy deployments, not a way to hide
+	// spans by default: the whole feature is off unless OTLP_ENDPOINT is set.
+	DefaultOTLPSampleRate = 1.0
 	// DefaultHTTPMaxBodyBytes is 1 MiB. Rule params are nested JSON and
 	// channel configs are small; 1 MiB is well above any legitimate write
 	// payload while bounding unauthenticated POSTs on a small instance.
@@ -107,7 +111,31 @@ type Config struct {
 	// MonitorSilentAfter is how long since last_matched_at before the
 	// dashboard marks a monitor silent. Default 24h.
 	MonitorSilentAfter time.Duration
+	// OTLP is the OpenTelemetry tracing configuration. Endpoint empty (the
+	// default, OTLP_ENDPOINT unset) disables tracing entirely: no exporter,
+	// no exporter goroutines, no measurable overhead — spans collapse to
+	// no-ops. When set it is the OTLP/HTTP base URL spans are shipped to.
+	OTLP OTLPConfig
 }
+
+// OTLPConfig is the tracing slice of the configuration. It is a struct so a
+// stage that needs the endpoint does not pull the whole Config in.
+type OTLPConfig struct {
+	// Endpoint is the OTLP/HTTP base URL (OTLP_ENDPOINT, e.g.
+	// http://localhost:4318). Empty disables tracing.
+	Endpoint string
+	// ServiceName is the service.name resource attribute
+	// (OTLP_SERVICE_NAME). Empty falls back to "sorobeacon".
+	ServiceName string
+	// SampleRate is the fraction of traces kept, in [0,1]
+	// (OTLP_SAMPLE_RATE). Defaults to 1 (keep everything).
+	SampleRate float64
+}
+
+// Enabled reports whether tracing is switched on. The single place the
+// "off unless OTLP_ENDPOINT is set" rule lives, so the wiring in main and
+// the tests cannot drift apart.
+func (o OTLPConfig) Enabled() bool { return o.Endpoint != "" }
 
 // Load reads configuration from the environment. DATABASE_URL is the only
 // required variable; everything else has a sensible default.
@@ -282,6 +310,28 @@ func Load() (Config, error) {
 		cfg.AlertRetention = d
 	}
 
+	// Tracing is off unless OTLP_ENDPOINT is set; see telemetry.Config.
+	cfg.OTLP.Endpoint = os.Getenv("OTLP_ENDPOINT")
+	if cfg.OTLP.Endpoint != "" {
+		u, err := url.Parse(cfg.OTLP.Endpoint)
+		if err != nil || !u.IsAbs() || u.Host == "" ||
+			(u.Scheme != "http" && u.Scheme != "https") {
+			return cfg, fmt.Errorf(
+				"invalid OTLP_ENDPOINT %q: must be an absolute http or https URL",
+				cfg.OTLP.Endpoint,
+			)
+		}
+	}
+	cfg.OTLP.ServiceName = os.Getenv("OTLP_SERVICE_NAME")
+	cfg.OTLP.SampleRate = DefaultOTLPSampleRate
+	if v := os.Getenv("OTLP_SAMPLE_RATE"); v != "" {
+		r, err := strconv.ParseFloat(v, 64)
+		if err != nil || r < 0 || r > 1 || math.IsNaN(r) || math.IsInf(r, 0) {
+			return cfg, fmt.Errorf("invalid OTLP_SAMPLE_RATE %q (want a number in [0, 1])", v)
+		}
+		cfg.OTLP.SampleRate = r
+	}
+
 	return cfg, nil
 }
 
@@ -324,6 +374,9 @@ func (c Config) LogAttrs() []slog.Attr {
 		// The count, never the tokens themselves: LogAttrs is the one place
 		// configuration is printed, and an API token is a credential.
 		slog.Int("api_token_count", len(c.APITokens)),
+		slog.Bool("otlp_tracing_enabled", c.OTLP.Endpoint != ""),
+		slog.String("otlp_service_name", c.OTLP.ServiceName),
+		slog.Float64("otlp_sample_rate", c.OTLP.SampleRate),
 	}
 }
 

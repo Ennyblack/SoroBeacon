@@ -26,6 +26,7 @@ import (
 	"github.com/sorotrail/sorobeacon/internal/sorotrail"
 	"github.com/sorotrail/sorobeacon/internal/stellar"
 	"github.com/sorotrail/sorobeacon/internal/store"
+	"github.com/sorotrail/sorobeacon/internal/telemetry"
 	"github.com/sorotrail/sorobeacon/internal/web"
 )
 
@@ -70,6 +71,34 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// Tracing is entirely off unless OTLP_ENDPOINT is set; with it unset
+	// Setup installs a no-op provider, spans cost nothing and Shutdown is
+	// a no-op. When enabled, the flush below must run before the process
+	// exits or the last spans of a deployment — often the interesting ones
+	// — are dropped with the batcher's queue.
+	tel, err := telemetry.Setup(ctx, telemetry.Config{
+		Endpoint:    cfg.OTLP.Endpoint,
+		ServiceName: cfg.OTLP.ServiceName,
+		SampleRate:  cfg.OTLP.SampleRate,
+	})
+	if err != nil {
+		return err
+	}
+	if tel.Enabled() {
+		log.Info("opentelemetry tracing enabled",
+			"otlp_endpoint", cfg.OTLP.Endpoint,
+			"otlp_service_name", cfg.OTLP.ServiceName,
+			"otlp_sample_rate", cfg.OTLP.SampleRate)
+	}
+	defer func() {
+		// Bounded so a hung collector delays shutdown by at most this long.
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := tel.Shutdown(flushCtx); err != nil {
+			log.Warn("flush pending spans on shutdown", "error", err)
+		}
+	}()
+
 	// Storage.
 	if err := store.Migrate(cfg.DatabaseURL); err != nil {
 		return err
@@ -83,7 +112,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	st.WithConfigCipher(configCipher)
+	st.WithConfigCipher(configCipher).WithTelemetry(tel)
 	defer st.Close()
 	log.Info("database ready")
 
@@ -140,8 +169,8 @@ func run() error {
 			return records, nil
 		})))
 	factory := notify.DefaultFactory()
-	dispatcher := notify.NewDispatcher(st, factory, log).WithMetrics(m)
-	p := poller.New(src, st, registry, dispatcher, cfg.PollInterval, log).WithMetrics(m)
+	dispatcher := notify.NewDispatcher(st, factory, log).WithMetrics(m).WithTelemetry(tel)
+	p := poller.New(src, st, registry.WithTelemetry(tel), dispatcher, cfg.PollInterval, log).WithMetrics(m).WithTelemetry(tel)
 
 	// HTTP: JSON API under /api/v1, dashboard at /.
 	apiSrv := api.New(st, registry, factory, health, log).

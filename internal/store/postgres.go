@@ -10,6 +10,10 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/sorotrail/sorobeacon/internal/telemetry"
 )
 
 // PoolSettings tunes the pgx connection pool. A zero value in any field
@@ -28,6 +32,15 @@ type Postgres struct {
 	// cipher encrypts and decrypts channels.config at rest. Nil (the
 	// default) keeps the pre-encryption plaintext behaviour.
 	cipher ConfigCipher
+	// telemetry is optional tracing; nil (the default) writes no spans.
+	telemetry *telemetry.Provider
+}
+
+// WithTelemetry attaches tracing to the store's write paths. Only ids go
+// into span attributes; the alert payload and channel config never do.
+func (p *Postgres) WithTelemetry(t *telemetry.Provider) *Postgres {
+	p.telemetry = t
+	return p
 }
 
 var _ Store = (*Postgres)(nil)
@@ -592,7 +605,35 @@ func (p *Postgres) scanChannel(row pgx.CollectableRow) (Channel, error) {
 
 // --- alerts ---
 
-func (p *Postgres) CreateAlert(ctx context.Context, a *Alert) (AlertOutcome, error) {
+// CreateAlert wraps the transaction with the store.create_alert span, so
+// the "was it the database write?" half of the slow-alert question has a
+// timeline. The outcome (created | duplicate | suppressed) is an attribute,
+// turning the dedup and cooldown gates into something visible per trace.
+// Only row ids land in attributes; the payload can embed operator data and
+// stays out.
+func (p *Postgres) CreateAlert(ctx context.Context, a *Alert) (outcome AlertOutcome, err error) {
+	if p.telemetry == nil {
+		return p.createAlert(ctx, a)
+	}
+	ctx, span := p.telemetry.WithRequestID(ctx, "store.create_alert",
+		trace.WithAttributes(
+			attribute.Int64(telemetry.AttrMonitorID, a.MonitorID),
+			attribute.Int64(telemetry.AttrRuleID, a.RuleID),
+			attribute.String(telemetry.AttrEventID, a.EventID),
+		),
+	)
+	defer func() {
+		if err != nil {
+			telemetry.RecordError(span, err)
+		} else {
+			telemetry.SetAttrs(span, telemetry.AttrOutcome, string(outcome))
+		}
+		span.End()
+	}()
+	return p.createAlert(ctx, a)
+}
+
+func (p *Postgres) createAlert(ctx context.Context, a *Alert) (AlertOutcome, error) {
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {
 		return "", err
