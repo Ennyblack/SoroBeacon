@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/sorotrail/sorobeacon/internal/broadcast"
 	"github.com/sorotrail/sorobeacon/internal/metrics"
 	"github.com/sorotrail/sorobeacon/internal/notify"
 	"github.com/sorotrail/sorobeacon/internal/rules"
@@ -59,6 +60,10 @@ type Poller struct {
 	log      *slog.Logger
 	// metrics is optional instrumentation; nil-safe, see internal/metrics.
 	metrics *metrics.Metrics
+	// live is the optional SSE fan-out. When set, every alert this poller
+	// creates is published to it; nil (the New default) disables live
+	// alerts entirely.
+	live *broadcast.Broadcaster
 	// scanned/matched accumulate per-cycle counts for metrics.
 	scanned int
 	matched int
@@ -101,6 +106,15 @@ func New(src EventSource, st Store, reg *rules.Registry, d Dispatcher, interval 
 // WithMetrics attaches Prometheus instrumentation to the poll loop.
 func (p *Poller) WithMetrics(m *metrics.Metrics) *Poller {
 	p.metrics = m
+	return p
+}
+
+// WithPublisher attaches the live fan-out that serves the SSE endpoint. The
+// same Broadcaster is handed to internal/api: the poller publishes into it as
+// alerts are created and /alerts/stream reads out of it, so no database
+// round-trip is needed to see an alert appear on a connected dashboard.
+func (p *Poller) WithPublisher(b *broadcast.Broadcaster) *Poller {
+	p.live = b
 	return p
 }
 
@@ -354,6 +368,22 @@ func (p *Poller) fireAlert(ctx context.Context, m store.Monitor, rule store.Rule
 		logAttrs = append(logAttrs, "suppressed_since_last", alert.SuppressedSinceLast)
 	}
 	p.log.Info("alert created", logAttrs...)
+
+	// Publish before dispatching: a live dashboard should see the alert the
+	// moment it exists, not after the (possibly retried) channel fan-out.
+	// Only created alerts reach here — duplicates and cooldown-suppressed
+	// matches returned above — so the stream mirrors the alert table exactly.
+	if p.live != nil {
+		p.live.Publish(broadcast.Alert{
+			ID:          alert.ID,
+			MonitorID:   m.ID,
+			MonitorName: m.Name,
+			RuleID:      rule.ID,
+			EventID:     eventID,
+			Payload:     alert.Payload,
+			CreatedAt:   alert.CreatedAt,
+		})
+	}
 
 	p.dispatch.Dispatch(ctx, notify.Alert{
 		ID:          alert.ID,

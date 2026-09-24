@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sorotrail/sorobeacon/internal/broadcast"
 	"github.com/sorotrail/sorobeacon/internal/notify"
 	"github.com/sorotrail/sorobeacon/internal/rules"
 	"github.com/sorotrail/sorobeacon/internal/stellar"
@@ -280,6 +281,75 @@ func TestPollMatchesAndDispatches(t *testing.T) {
 	require.NotNil(t, st.monitors[0].LastMatchedAt)
 	assert.True(t, st.monitors[0].LastMatchedAt.Equal(time.Unix(1_700_000_000, 0).UTC()),
 		"last_matched_at must be the event ledger close time, not wall clock")
+}
+
+// TestPollPublishesCreatedAlertsToLiveStream pins the SSE publish point: an
+// alert that is persisted is fanned out to live subscribers with the monitor's
+// name and the stored payload, so a dashboard can render the row directly.
+func TestPollPublishesCreatedAlertsToLiveStream(t *testing.T) {
+	rpc := &fakeRPC{
+		latest: 6000,
+		responses: []*stellar.GetEventsResult{{
+			Events:       []stellar.Event{transferEvent("ev-1", 5990, "100")},
+			LatestLedger: 6000,
+		}},
+	}
+	st := newFakeStore()
+	st.state.LastLedger = 5500
+	seedMonitor(st, `{"event_name": "transfer"}`)
+
+	live := broadcast.New(4)
+	sub := live.Subscribe(0)
+	defer sub.Close()
+	p := newTestPoller(rpc, st, &fakeDispatcher{}).WithPublisher(live)
+
+	require.NoError(t, p.Poll(context.Background()))
+
+	select {
+	case got := <-sub.C:
+		assert.Equal(t, st.alerts[0].ID, got.ID)
+		assert.Equal(t, int64(1), got.MonitorID)
+		assert.Equal(t, "m1", got.MonitorName)
+		assert.Equal(t, "ev-1", got.EventID)
+		assert.JSONEq(t, string(st.alerts[0].Payload), string(got.Payload))
+	case <-time.After(2 * time.Second):
+		t.Fatal("a created alert was not published to the live stream")
+	}
+}
+
+// TestPollDoesNotPublishDedupedAlerts is the other half: a replayed event that
+// the dedup guard rejects must not appear on the live stream, or a viewer would
+// see the same alert twice.
+func TestPollDoesNotPublishDedupedAlerts(t *testing.T) {
+	st := newFakeStore()
+	st.state.LastLedger = 5500
+	seedMonitor(st, `{"event_name": "transfer"}`)
+	live := broadcast.New(4)
+	sub := live.Subscribe(0)
+	defer sub.Close()
+
+	page := func() *fakeRPC {
+		return &fakeRPC{latest: 6000, responses: []*stellar.GetEventsResult{{
+			Events:       []stellar.Event{transferEvent("ev-dup", 5990, "1")},
+			LatestLedger: 6000,
+		}}}
+	}
+	// First poll creates and publishes; the replay is deduped and must not.
+	require.NoError(t, newTestPoller(page(), st, &fakeDispatcher{}).WithPublisher(live).Poll(context.Background()))
+	st.state.LastLedger = 5500
+	require.NoError(t, newTestPoller(page(), st, &fakeDispatcher{}).WithPublisher(live).Poll(context.Background()))
+
+	select {
+	case got := <-sub.C:
+		assert.Equal(t, "ev-dup", got.EventID)
+	case <-time.After(2 * time.Second):
+		t.Fatal("the created alert was not published")
+	}
+	select {
+	case extra := <-sub.C:
+		t.Fatalf("deduped alert was published again: %+v", extra)
+	case <-time.After(50 * time.Millisecond):
+	}
 }
 
 func TestPollDedupsAcrossPolls(t *testing.T) {

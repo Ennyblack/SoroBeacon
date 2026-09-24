@@ -17,6 +17,7 @@ import (
 
 	"github.com/sorotrail/sorobeacon/internal/api"
 	"github.com/sorotrail/sorobeacon/internal/auth"
+	"github.com/sorotrail/sorobeacon/internal/broadcast"
 	"github.com/sorotrail/sorobeacon/internal/config"
 	"github.com/sorotrail/sorobeacon/internal/metrics"
 	"github.com/sorotrail/sorobeacon/internal/notify"
@@ -141,7 +142,14 @@ func run() error {
 		})))
 	factory := notify.DefaultFactory()
 	dispatcher := notify.NewDispatcher(st, factory, log).WithMetrics(m)
-	p := poller.New(src, st, registry, dispatcher, cfg.PollInterval, log).WithMetrics(m)
+	// One in-process fan-out carries newly created alerts to the SSE endpoint.
+	// The poller publishes into exactly the instance the API serves from, so
+	// /alerts/stream needs no database round-trip to show a live alert.
+	liveAlerts := broadcast.New(broadcast.DefaultBuffer)
+	m.RegisterStreamDropped(liveAlerts.Dropped)
+	p := poller.New(src, st, registry, dispatcher, cfg.PollInterval, log).
+		WithMetrics(m).
+		WithPublisher(liveAlerts)
 
 	// HTTP: JSON API under /api/v1, dashboard at /.
 	apiSrv := api.New(st, registry, factory, health, log).
@@ -153,6 +161,7 @@ func run() error {
 			TrustForwarded: cfg.RateLimitTrustForwarded,
 		}).
 		WithMaxBodyBytes(cfg.HTTPMaxBodyBytes).
+		WithBroadcaster(liveAlerts).
 		WithAuth(authn)
 	webSrv, err := web.New(st, registry, factory, log)
 	if err != nil {
