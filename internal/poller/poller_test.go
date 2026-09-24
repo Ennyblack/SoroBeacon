@@ -77,6 +77,9 @@ type fakeStore struct {
 	now        func() time.Time
 	lastFired  map[int64]time.Time // rule id -> last alert time
 	suppressed map[int64]int64     // rule id -> matches dropped this window
+
+	// groupStates tracks alert group state for testing grouping.
+	groupStates map[string]int64 // group_key -> count
 }
 
 func newFakeStore() *fakeStore {
@@ -86,6 +89,7 @@ func newFakeStore() *fakeStore {
 		now:        time.Now,
 		lastFired:  map[int64]time.Time{},
 		suppressed: map[int64]int64{},
+		groupStates: map[string]int64{},
 	}
 }
 
@@ -149,6 +153,22 @@ func (f *fakeStore) GetIngestState(context.Context) (store.IngestState, error) {
 func (f *fakeStore) SetIngestState(_ context.Context, s store.IngestState) error {
 	f.state = s
 	return nil
+}
+
+// CreateAlertGroup creates or increments the alert group for key
+// with windowStart. Returns the new count.
+func (f *fakeStore) CreateAlertGroup(_ context.Context, key string, _ time.Time) (int64, error) {
+	f.groupStates[key]++
+	return f.groupStates[key], nil
+}
+
+// GroupAlerts creates or increments the alert group for key
+// with windowStart and returns whether delivery should happen
+// (first alert in the window) and the current count.
+func (f *fakeStore) GroupAlerts(_ context.Context, key string, _ time.Time) (bool, int64, error) {
+	count := f.groupStates[key] + 1
+	f.groupStates[key] = count
+	return count == 1, count, nil
 }
 
 // fakeDispatcher records dispatched alerts.

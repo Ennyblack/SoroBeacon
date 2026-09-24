@@ -31,6 +31,16 @@ type Alert struct {
 	TxHash      string          `json:"tx_hash"`
 	Payload     json.RawMessage `json:"payload,omitempty"`
 	CreatedAt   time.Time       `json:"created_at"`
+	// GroupCount is the number of alerts in the current grouping
+	// window. It is > 1 for suppressed alerts that are part of a
+	// group and not delivered individually. Zero means grouping is
+	// disabled or not applicable.
+	GroupCount int64 `json:"group_count,omitempty"`
+	// WindowStart and WindowEnd bound the grouping window. They are
+	// set when grouping is enabled so the delivered message can show
+	// the window bounds and total count.
+	WindowStart time.Time `json:"window_start,omitempty"`
+	WindowEnd   time.Time `json:"window_end,omitempty"`
 }
 
 // Notifier sends one alert to one destination. Implementations should
@@ -107,6 +117,9 @@ Ledger: {{.Ledger}}
 Tx: {{.TxHash}}
 Event ID: {{.EventID}}
 At: {{.CreatedAt.UTC.Format "2006-01-02 15:04:05"}} UTC
+{{- if gt .GroupCount 0}}
+Group: {{.GroupCount}} alert(s) in window {{.WindowStart.UTC.Format "2006-01-02T15:04:05Z"}} to {{.WindowEnd.UTC.Format "2006-01-02T15:04:05Z"}}
+{{- end}}
 `)))
 
 // RenderText renders the default plain-text message for an alert.

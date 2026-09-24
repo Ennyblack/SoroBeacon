@@ -686,6 +686,36 @@ func (p *Postgres) CreateAlert(ctx context.Context, a *Alert) (AlertOutcome, err
 	return AlertCreated, nil
 }
 
+// CreateAlertGroup creates or increments the alert group identified
+// by key and windowStart. On conflict it increments the count; on
+// first insertion it initializes count to 1. Returns the new count.
+func (p *Postgres) CreateAlertGroup(ctx context.Context, key string, windowStart time.Time) (int64, error) {
+	var count int64
+	err := p.pool.QueryRow(ctx,
+		`INSERT INTO alert_groups (group_key, window_start, count, first_alert_id)
+		 VALUES ($1, $2, 1, NULL)
+		 ON CONFLICT (group_key, window_start) DO UPDATE
+		 SET count = alert_groups.count + 1
+		 RETURNING count`,
+		key, windowStart,
+	).Scan(&count)
+	if err != nil {
+		return 0, mapErr(err)
+	}
+	return count, nil
+}
+
+// GroupAlerts creates or increments the alert group for key with
+// windowStart and returns whether the alert should be delivered
+// immediately (first alert in the window) and the current count.
+func (p *Postgres) GroupAlerts(ctx context.Context, key string, windowStart time.Time) (shouldDeliver bool, currentCount int64, err error) {
+	count, err := p.CreateAlertGroup(ctx, key, windowStart)
+	if err != nil {
+		return false, 0, err
+	}
+	return count == 1, count, nil
+}
+
 func (p *Postgres) GetAlert(ctx context.Context, id int64) (*Alert, error) {
 	var a Alert
 	err := p.pool.QueryRow(ctx,
@@ -759,6 +789,63 @@ func (p *Postgres) ListAlerts(ctx context.Context, f AlertFilter) ([]Alert, erro
 		err := row.Scan(&a.ID, &a.MonitorID, &a.RuleID, &a.EventID, &a.Payload, &a.CreatedAt)
 		return a, err
 	})
+}
+
+// ListAlertsStream streams alerts matching f one at a time under a
+// repeatable-read snapshot. The callback is called for each alert;
+// returning a non-nil error stops the stream.
+func (p *Postgres) ListAlertsStream(ctx context.Context, f AlertFilter, cb func(Alert) error) error {
+	q := `SELECT id, monitor_id, rule_id, event_id, payload, created_at FROM alerts WHERE TRUE`
+	args := []any{}
+	n := 0
+	arg := func(v any) string {
+		n++
+		args = append(args, v)
+		return fmt.Sprintf("$%d", n)
+	}
+	if f.MonitorID != 0 {
+		q += ` AND monitor_id = ` + arg(f.MonitorID)
+	}
+	if f.RuleID != 0 {
+		q += ` AND rule_id = ` + arg(f.RuleID)
+	}
+	if f.ContractID != "" {
+		q += ` AND payload->>'contract_id' = ` + arg(f.ContractID)
+	}
+	if !f.From.IsZero() {
+		q += ` AND created_at >= ` + arg(f.From)
+	}
+	if !f.To.IsZero() {
+		q += ` AND created_at < ` + arg(f.To)
+	}
+	sort := alertSort(f.Sort)
+	if f.AfterID != 0 {
+		cursor := `(SELECT created_at, id FROM alerts WHERE id = ` + arg(f.AfterID) + `)`
+		if sort == "created_at_asc" {
+			q += ` AND (created_at, id) > ` + cursor
+		} else {
+			q += ` AND (created_at, id) < ` + cursor
+		}
+	}
+	q += ` ORDER BY created_at DESC, id DESC`
+	if f.Limit > 0 {
+		q += ` LIMIT ` + arg(pageLimit(f.Limit))
+	}
+	rows, err := p.pool.Query(ctx, q, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var a Alert
+		if err := rows.Scan(&a.ID, &a.MonitorID, &a.RuleID, &a.EventID, &a.Payload, &a.CreatedAt); err != nil {
+			return err
+		}
+		if err := cb(a); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
 }
 
 func (p *Postgres) RecordDeliveryAttempt(ctx context.Context, d *DeliveryAttempt) error {

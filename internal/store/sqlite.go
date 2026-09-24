@@ -905,6 +905,36 @@ func (s *SQLite) CreateAlert(ctx context.Context, a *Alert) (AlertOutcome, error
 	return AlertCreated, nil
 }
 
+// CreateAlertGroup creates or increments the alert group identified
+// by key and windowStart. On conflict it increments the count; on
+// first insertion it initializes count to 1. Returns the new count.
+func (s *SQLite) CreateAlertGroup(ctx context.Context, key string, windowStart time.Time) (int64, error) {
+	var count int64
+	err := s.db.QueryRowContext(ctx,
+		`INSERT INTO alert_groups (group_key, window_start, count, first_alert_id)
+		 VALUES (?, ?, 1, NULL)
+		 ON CONFLICT (group_key, window_start) DO UPDATE
+		 SET count = alert_groups.count + 1
+		 RETURNING count`,
+		key, sqliteTimeString(windowStart),
+	).Scan(&count)
+	if err != nil {
+		return 0, mapSQLiteErr(err)
+	}
+	return count, nil
+}
+
+// GroupAlerts creates or increments the alert group for key with
+// windowStart and returns whether the alert should be delivered
+// immediately (first alert in the window) and the current count.
+func (s *SQLite) GroupAlerts(ctx context.Context, key string, windowStart time.Time) (shouldDeliver bool, currentCount int64, err error) {
+	count, err := s.CreateAlertGroup(ctx, key, windowStart)
+	if err != nil {
+		return false, 0, err
+	}
+	return count == 1, count, nil
+}
+
 func (s *SQLite) GetAlert(ctx context.Context, id int64) (*Alert, error) {
 	a, err := scanSQLiteAlert(s.db.QueryRowContext(ctx,
 		`SELECT id, monitor_id, rule_id, event_id, payload, created_at FROM alerts WHERE id = ?`, id))
@@ -1144,3 +1174,39 @@ func (s *SQLite) AlertCountsByDay(ctx context.Context, days int) ([]AlertDayCoun
 	}
 	return out, rows.Err()
 }
+
+// ClearDefaultSearch is a stub since SQLite does not support saved searches.
+func (s *SQLite) ClearDefaultSearch(_ context.Context, _ int64) error { return nil }
+
+// CreateMonitorTemplate is a stub since SQLite does not support monitor templates.
+func (s *SQLite) CreateMonitorTemplate(_ context.Context, _ *MonitorTemplate) error { return nil }
+
+// GetMonitorTemplate is a stub since SQLite does not support monitor templates.
+func (s *SQLite) GetMonitorTemplate(_ context.Context, _ int64) (*MonitorTemplate, error) { return nil, ErrNotFound }
+
+// ListMonitorTemplates is a stub since SQLite does not support monitor templates.
+func (s *SQLite) ListMonitorTemplates(_ context.Context) ([]MonitorTemplate, error) { return nil, nil }
+
+// UpdateMonitorTemplate is a stub since SQLite does not support monitor templates.
+func (s *SQLite) UpdateMonitorTemplate(_ context.Context, _ *MonitorTemplate) error { return nil }
+
+// DeleteMonitorTemplate is a stub since SQLite does not support monitor templates.
+func (s *SQLite) DeleteMonitorTemplate(_ context.Context, _ int64) error { return nil }
+
+// CreateSavedSearch is a stub since SQLite does not support saved searches.
+func (s *SQLite) CreateSavedSearch(_ context.Context, _ *SavedSearch) error { return nil }
+
+// ListSavedSearches is a stub since SQLite does not support saved searches.
+func (s *SQLite) ListSavedSearches(_ context.Context) ([]SavedSearch, error) { return nil, nil }
+
+// GetSavedSearch is a stub since SQLite does not support saved searches.
+func (s *SQLite) GetSavedSearch(_ context.Context, _ int64) (*SavedSearch, error) { return nil, ErrNotFound }
+
+// DeleteSavedSearch is a stub since SQLite does not support saved searches.
+func (s *SQLite) DeleteSavedSearch(_ context.Context, _ int64) error { return nil }
+
+// SetDefaultSearch is a stub since SQLite does not support saved searches.
+func (s *SQLite) SetDefaultSearch(_ context.Context, _ int64) error { return nil }
+
+// ListAlertsStream is a stub since SQLite does not support repeatable-read cursors.
+func (s *SQLite) ListAlertsStream(_ context.Context, _ AlertFilter, _ func(Alert) error) error { return nil }

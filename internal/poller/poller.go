@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/sorotrail/sorobeacon/internal/alerts"
 	"github.com/sorotrail/sorobeacon/internal/metrics"
 	"github.com/sorotrail/sorobeacon/internal/notify"
 	"github.com/sorotrail/sorobeacon/internal/rules"
@@ -38,6 +39,8 @@ type Store interface {
 	ListMonitors(ctx context.Context, enabledOnly bool) ([]store.Monitor, error)
 	ListRules(ctx context.Context, monitorID int64, enabledOnly bool) ([]store.Rule, error)
 	CreateAlert(ctx context.Context, a *store.Alert) (store.AlertOutcome, error)
+	GroupAlerts(ctx context.Context, key string, windowStart time.Time) (shouldDeliver bool, currentCount int64, err error)
+	CreateAlertGroup(ctx context.Context, key string, windowStart time.Time) (int64, error)
 	GetIngestState(ctx context.Context) (store.IngestState, error)
 	SetIngestState(ctx context.Context, s store.IngestState) error
 }
@@ -65,6 +68,11 @@ type Poller struct {
 	// pos is the last successful poll snapshot, stored as Position.
 	// atomic.Value so HTTP handlers can read it without a mutex.
 	pos atomic.Value
+	// GroupWindow is the duration of the fixed tumbling window for
+	// alert grouping. Zero means grouping is disabled and all alerts
+	// are dispatched normally, preserving the pre-existing behaviour
+	// for existing deployments.
+	GroupWindow time.Duration
 }
 
 // Position returns the last successful poll snapshot. Safe to call from
@@ -101,6 +109,14 @@ func New(src EventSource, st Store, reg *rules.Registry, d Dispatcher, interval 
 // WithMetrics attaches Prometheus instrumentation to the poll loop.
 func (p *Poller) WithMetrics(m *metrics.Metrics) *Poller {
 	p.metrics = m
+	return p
+}
+
+// WithGroupWindow sets the grouping window duration. A zero value
+// disables grouping so all alerts dispatch immediately, matching
+// the default behaviour for existing deployments.
+func (p *Poller) WithGroupWindow(d time.Duration) *Poller {
+	p.GroupWindow = d
 	return p
 }
 
@@ -355,6 +371,32 @@ func (p *Poller) fireAlert(ctx context.Context, m store.Monitor, rule store.Rule
 	}
 	p.log.Info("alert created", logAttrs...)
 
+	// Grouping decision: if a window is configured, check the group
+	// state before dispatching. The first alert in the window is
+	// delivered immediately; subsequent alerts are suppressed until
+	// the window closes and a summary is delivered.
+	groupCount := int64(0)
+	windowStart := time.Time{}
+	windowEnd := time.Time{}
+	if p.GroupWindow > 0 {
+		windowStart = ev.LedgerClosedAt.Truncate(p.GroupWindow)
+		windowEnd = windowStart.Add(p.GroupWindow)
+		key := alerts.MakeGroupKey(m.ID, rule.ID, ev.ContractID).String()
+		count, err := p.store.CreateAlertGroup(ctx, key, windowStart)
+		if err != nil {
+			p.log.Error("create alert group", "key", key, "window_start", windowStart, "err", err)
+		} else {
+			groupCount = count
+			if count > 1 {
+				// This alert is part of an existing window: it is
+				// not delivered individually; the summary covers it.
+				p.log.Info("alert grouped, suppressed",
+					"key", key, "window_start", windowStart, "group_count", count)
+				return
+			}
+		}
+	}
+
 	p.dispatch.Dispatch(ctx, notify.Alert{
 		ID:          alert.ID,
 		MonitorID:   m.ID,
@@ -370,6 +412,11 @@ func (p *Poller) fireAlert(ctx context.Context, m store.Monitor, rule store.Rule
 		// notification reports it too.
 		Payload:   alert.Payload,
 		CreatedAt: alert.CreatedAt,
+		// GroupCount is 1 for the first alert in a window (the one
+		// we are delivering now) and 0 when grouping is disabled.
+		GroupCount: groupCount,
+		WindowStart: windowStart,
+		WindowEnd:   windowEnd,
 	})
 }
 
