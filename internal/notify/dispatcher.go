@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/sorotrail/sorobeacon/internal/alerts"
 	"github.com/sorotrail/sorobeacon/internal/metrics"
 	"github.com/sorotrail/sorobeacon/internal/store"
 )
@@ -28,6 +29,9 @@ const DefaultRetryCooldown = 30 * time.Second
 type DispatchStore interface {
 	ListChannelsForMonitor(ctx context.Context, monitorID int64) ([]store.Channel, error)
 	RecordDeliveryAttempt(ctx context.Context, d *store.DeliveryAttempt) error
+	ListInhibitionsForTarget(ctx context.Context, targetRuleID int64) ([]store.Inhibition, error)
+	RuleFiredWithin(ctx context.Context, ruleID int64, window time.Duration) (bool, error)
+	MarkAlertInhibited(ctx context.Context, alertID, sourceRuleID int64) error
 }
 
 // Dispatcher fans an alert out to its monitor's channels, retrying each
@@ -65,7 +69,15 @@ func (d *Dispatcher) WithMetrics(m *metrics.Metrics) *Dispatcher {
 // Dispatch delivers one alert to every enabled channel attached to its
 // monitor. Channel failures are recorded and logged, never fatal: one bad
 // channel must not block the others or the poller.
+//
+// Before delivering, the dispatcher consults the inhibition rules targeting
+// the alert's rule. An inhibited alert is recorded (MarkAlertInhibited, so
+// the dashboard can show why nothing was sent) and not delivered — but the
+// alert row itself is always kept.
 func (d *Dispatcher) Dispatch(ctx context.Context, a Alert) {
+	if d.inhibited(ctx, a) {
+		return
+	}
 	channels, err := d.store.ListChannelsForMonitor(ctx, a.MonitorID)
 	if err != nil {
 		d.log.Error("list channels for alert", "alert_id", a.ID, "monitor_id", a.MonitorID, "err", err)
@@ -74,6 +86,30 @@ func (d *Dispatcher) Dispatch(ctx context.Context, a Alert) {
 	for _, ch := range channels {
 		d.deliver(ctx, a, ch)
 	}
+}
+
+// inhibited reports whether an inhibition rule suppresses this alert's
+// delivery, recording the suppression when it does. A firing-check failure
+// fails open (deliver): losing a page is worse than sending a duplicate.
+func (d *Dispatcher) inhibited(ctx context.Context, a Alert) bool {
+	pairs, err := d.store.ListInhibitionsForTarget(ctx, a.RuleID)
+	if err != nil {
+		d.log.Error("list inhibitions for alert", "alert_id", a.ID, "rule_id", a.RuleID, "err", err)
+		return false
+	}
+	source, inhibited, err := alerts.InhibitedBy(ctx, a.RuleID, pairs, d.store.RuleFiredWithin)
+	if err != nil {
+		d.log.Error("check inhibition for alert", "alert_id", a.ID, "rule_id", a.RuleID, "err", err)
+		return false
+	}
+	if !inhibited {
+		return false
+	}
+	if err := d.store.MarkAlertInhibited(ctx, a.ID, source); err != nil {
+		d.log.Error("mark alert inhibited", "alert_id", a.ID, "inhibited_by_rule_id", source, "err", err)
+	}
+	d.log.Info("alert delivery inhibited", "alert_id", a.ID, "rule_id", a.RuleID, "inhibited_by_rule_id", source)
+	return true
 }
 
 func (d *Dispatcher) deliver(ctx context.Context, a Alert, ch store.Channel) {

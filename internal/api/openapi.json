@@ -413,6 +413,77 @@
         }
       }
     },
+    "/inhibitions": {
+      "post": {
+        "summary": "Create an inhibition rule",
+        "description": "While the source rule is firing (an alert within the pair's firing window, default 300s), deliveries for the target rule are suppressed. Alert rows are still stored.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/InhibitionInput" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Inhibition" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "get": {
+        "summary": "List inhibition rules",
+        "responses": {
+          "200": {
+            "description": "Inhibitions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "inhibitions": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/Inhibition" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/inhibitions/{sourceID}/{targetID}": {
+      "delete": {
+        "summary": "Delete an inhibition rule",
+        "parameters": [
+          {
+            "name": "sourceID",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "integer", "format": "int64" }
+          },
+          {
+            "name": "targetID",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "integer", "format": "int64" }
+          }
+        ],
+        "responses": {
+          "204": { "description": "Deleted" },
+          "400": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
     "/alerts": {
       "get": {
         "summary": "List alerts",
@@ -1021,6 +1092,31 @@
           },
           "params": { "type": "object" },
           "enabled": { "type": "boolean" }
+        }
+      },
+      "Inhibition": {
+        "type": "object",
+        "properties": {
+          "source_rule_id": { "type": "integer", "format": "int64" },
+          "target_rule_id": { "type": "integer", "format": "int64" },
+          "firing_window_seconds": {
+            "type": "integer",
+            "description": "Source counts as firing with an alert inside this window"
+          },
+          "created_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "InhibitionInput": {
+        "type": "object",
+        "required": ["source_rule_id", "target_rule_id"],
+        "properties": {
+          "source_rule_id": { "type": "integer", "format": "int64" },
+          "target_rule_id": { "type": "integer", "format": "int64" },
+          "firing_window_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Optional; defaults to 300 when absent or non-positive"
+          }
         }
       },
       "RuleInput": {

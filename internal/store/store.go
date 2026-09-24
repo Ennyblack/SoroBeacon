@@ -63,6 +63,10 @@ type Alert struct {
 	EventID   string          `json:"event_id"`
 	Payload   json.RawMessage `json:"payload"`
 	CreatedAt time.Time       `json:"created_at"`
+	// InhibitedByRuleID is set when an inhibition rule suppressed this
+	// alert's delivery. Nil means delivered (or never subjected to
+	// inhibition); the alert row itself is always stored.
+	InhibitedByRuleID *int64 `json:"inhibited_by_rule_id,omitempty"`
 	// LedgerClosedAt is the matching event's ledger close time. CreateAlert
 	// uses it to stamp monitors.last_matched_at; it is not stored on the
 	// alert row. Zero skips the stamp so callers that only persist an
@@ -303,6 +307,48 @@ type Ingest interface {
 	SetIngestState(ctx context.Context, s IngestState) error
 }
 
+// DefaultInhibitionWindowSeconds bounds "currently firing" when an
+// inhibition pair carries no explicit window: the source counts as firing
+// when it produced an alert within the last five minutes. Long enough to
+// cover a sustained incident, short enough that a genuinely new episode the
+// next day is not hidden.
+const DefaultInhibitionWindowSeconds = 300
+
+// Inhibition suppresses delivery for one rule while another rule is
+// firing, without dropping the alert record. Pairs may cross monitors: one
+// incident usually trips several monitors and the root-cause page is what
+// the operator wants to receive.
+type Inhibition struct {
+	// SourceRuleID is the rule whose firing suppresses the target.
+	SourceRuleID int64 `json:"source_rule_id"`
+	// TargetRuleID is the rule whose deliveries are suppressed.
+	TargetRuleID int64 `json:"target_rule_id"`
+	// FiringWindowSeconds bounds "currently firing": the source counts as
+	// firing when it produced an alert within the last N seconds.
+	FiringWindowSeconds int `json:"firing_window_seconds"`
+	CreatedAt           time.Time `json:"created_at"`
+}
+
+// Inhibitions persists inhibition rules between rules.
+type Inhibitions interface {
+	// CreateInhibition stores a (source, target) pair. A duplicate pair or
+	// a reference to a missing rule is an error; a rule inhibiting itself
+	// is rejected by the API layer.
+	CreateInhibition(ctx context.Context, in *Inhibition) error
+	// ListInhibitions returns every pair, ordered by (source, target).
+	ListInhibitions(ctx context.Context) ([]Inhibition, error)
+	// ListInhibitionsForTarget returns the pairs suppressing one rule.
+	ListInhibitionsForTarget(ctx context.Context, targetRuleID int64) ([]Inhibition, error)
+	// DeleteInhibition removes one pair; unknown pairs are ErrNotFound.
+	DeleteInhibition(ctx context.Context, sourceRuleID, targetRuleID int64) error
+	// RuleFiredWithin reports whether ruleID produced an alert in the last
+	// window. It is the firing signal the dispatcher consults.
+	RuleFiredWithin(ctx context.Context, ruleID int64, window time.Duration) (bool, error)
+	// MarkAlertInhibited records which source rule suppressed an alert's
+	// delivery, so the dashboard can show why nothing was sent.
+	MarkAlertInhibited(ctx context.Context, alertID, sourceRuleID int64) error
+}
+
 // SavedSearch is a named, reusable alert filter combination.
 type SavedSearch struct {
 	ID        int64            `json:"id"`
@@ -374,6 +420,7 @@ type Store interface {
 	Rules
 	Channels
 	Alerts
+	Inhibitions
 	Ingest
 	SavedSearches
 	MonitorTemplates

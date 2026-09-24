@@ -907,7 +907,7 @@ func (s *SQLite) CreateAlert(ctx context.Context, a *Alert) (AlertOutcome, error
 
 func (s *SQLite) GetAlert(ctx context.Context, id int64) (*Alert, error) {
 	a, err := scanSQLiteAlert(s.db.QueryRowContext(ctx,
-		`SELECT id, monitor_id, rule_id, event_id, payload, created_at FROM alerts WHERE id = ?`, id))
+		`SELECT id, monitor_id, rule_id, event_id, payload, created_at, inhibited_by_rule_id FROM alerts WHERE id = ?`, id))
 	if err != nil {
 		return nil, err
 	}
@@ -915,7 +915,7 @@ func (s *SQLite) GetAlert(ctx context.Context, id int64) (*Alert, error) {
 }
 
 func (s *SQLite) ListAlerts(ctx context.Context, f AlertFilter) ([]Alert, error) {
-	q := `SELECT id, monitor_id, rule_id, event_id, payload, created_at FROM alerts WHERE 1 = 1`
+	q := `SELECT id, monitor_id, rule_id, event_id, payload, created_at, inhibited_by_rule_id FROM alerts WHERE 1 = 1`
 	args := []any{}
 	if f.MonitorID != 0 {
 		q += ` AND monitor_id = ?`
@@ -978,13 +978,18 @@ func scanSQLiteAlert(r rowScanner) (Alert, error) {
 	var a Alert
 	var payload string
 	var created string
-	if err := r.Scan(&a.ID, &a.MonitorID, &a.RuleID, &a.EventID, &payload, &created); err != nil {
+	var inhibited sql.NullInt64
+	if err := r.Scan(&a.ID, &a.MonitorID, &a.RuleID, &a.EventID, &payload, &created, &inhibited); err != nil {
 		return a, mapSQLiteErr(err)
 	}
 	a.Payload = json.RawMessage(payload)
 	var err error
 	if a.CreatedAt, err = parseSQLiteTime(created); err != nil {
 		return a, err
+	}
+	if inhibited.Valid {
+		v := inhibited.Int64
+		a.InhibitedByRuleID = &v
 	}
 	return a, nil
 }
@@ -1143,4 +1148,322 @@ func (s *SQLite) AlertCountsByDay(ctx context.Context, days int) ([]AlertDayCoun
 		out = append(out, AlertDayCount{Day: day, Count: count})
 	}
 	return out, rows.Err()
+}
+
+// --- saved searches ---
+
+// The Postgres implementation is the reference; SQLite mirrors its
+// single-default behaviour (clearing other defaults in the same statement)
+// and its JSON-TEXT storage. These methods exist so *SQLite satisfies the
+// Store interface — main was red without them.
+
+func (s *SQLite) CreateSavedSearch(ctx context.Context, ss *SavedSearch) error {
+	filter, _ := json.Marshal(ss.Filter)
+	if ss.IsDefault {
+		_, _ = s.db.ExecContext(ctx, `UPDATE saved_searches SET is_default = 0 WHERE is_default = 1`)
+	}
+	var created string
+	if err := s.db.QueryRowContext(ctx,
+		`INSERT INTO saved_searches (name, filter, is_default) VALUES (?, ?, ?) RETURNING id, created_at`,
+		ss.Name, string(filter), boolToInt(ss.IsDefault),
+	).Scan(&ss.ID, &created); err != nil {
+		return mapSQLiteErr(err)
+	}
+	createdAt, err := parseSQLiteTime(created)
+	if err != nil {
+		return err
+	}
+	ss.CreatedAt = createdAt
+	return nil
+}
+
+func (s *SQLite) scanSavedSearch(r rowScanner, ss *SavedSearch) error {
+	var filter string
+	var isDefault int64
+	var created string
+	if err := r.Scan(&ss.ID, &ss.Name, &filter, &isDefault, &created); err != nil {
+		return mapSQLiteErr(err)
+	}
+	ss.IsDefault = isDefault != 0
+	_ = json.Unmarshal([]byte(filter), &ss.Filter)
+	createdAt, err := parseSQLiteTime(created)
+	if err != nil {
+		return err
+	}
+	ss.CreatedAt = createdAt
+	return nil
+}
+
+func (s *SQLite) ListSavedSearches(ctx context.Context) ([]SavedSearch, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, name, filter, is_default, created_at FROM saved_searches ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []SavedSearch
+	for rows.Next() {
+		var ss SavedSearch
+		if err := s.scanSavedSearch(rows, &ss); err != nil {
+			return nil, err
+		}
+		out = append(out, ss)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLite) GetSavedSearch(ctx context.Context, id int64) (*SavedSearch, error) {
+	var ss SavedSearch
+	if err := s.scanSavedSearch(s.db.QueryRowContext(ctx,
+		`SELECT id, name, filter, is_default, created_at FROM saved_searches WHERE id = ?`, id), &ss); err != nil {
+		return nil, err
+	}
+	return &ss, nil
+}
+
+func (s *SQLite) DeleteSavedSearch(ctx context.Context, id int64) error {
+	return s.deleteByID(ctx, "saved_searches", id)
+}
+
+func (s *SQLite) SetDefaultSearch(ctx context.Context, id int64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `UPDATE saved_searches SET is_default = 0 WHERE is_default = 1`); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE saved_searches SET is_default = 1 WHERE id = ?`, id)
+	if err != nil {
+		return mapSQLiteErr(err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return tx.Commit()
+}
+
+func (s *SQLite) ClearDefaultSearch(ctx context.Context, id int64) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE saved_searches SET is_default = 0 WHERE id = ?`, id)
+	if err != nil {
+		return mapSQLiteErr(err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// --- monitor templates ---
+
+func (s *SQLite) scanMonitorTemplate(r rowScanner, t *MonitorTemplate) error {
+	var rulesJSON, channelIDs, paramsJSON string
+	var created string
+	if err := r.Scan(&t.ID, &t.Name, &t.Description, &rulesJSON, &channelIDs, &paramsJSON, &created); err != nil {
+		return mapSQLiteErr(err)
+	}
+	_ = json.Unmarshal([]byte(rulesJSON), &t.Rules)
+	_ = json.Unmarshal([]byte(channelIDs), &t.ChannelIDs)
+	_ = json.Unmarshal([]byte(paramsJSON), &t.Parameters)
+	if t.ChannelIDs == nil {
+		t.ChannelIDs = []int64{}
+	}
+	createdAt, err := parseSQLiteTime(created)
+	if err != nil {
+		return err
+	}
+	t.CreatedAt = createdAt
+	return nil
+}
+
+func (s *SQLite) CreateMonitorTemplate(ctx context.Context, t *MonitorTemplate) error {
+	rulesJSON, _ := json.Marshal(t.Rules)
+	channelJSON, _ := json.Marshal(t.ChannelIDs)
+	paramsJSON, _ := json.Marshal(t.Parameters)
+	var created string
+	if err := s.db.QueryRowContext(ctx,
+		`INSERT INTO monitor_templates (name, description, rules, channel_ids, parameters) VALUES (?, ?, ?, ?, ?) RETURNING id, created_at`,
+		t.Name, t.Description, string(rulesJSON), string(channelJSON), string(paramsJSON),
+	).Scan(&t.ID, &created); err != nil {
+		return mapSQLiteErr(err)
+	}
+	createdAt, err := parseSQLiteTime(created)
+	if err != nil {
+		return err
+	}
+	t.CreatedAt = createdAt
+	return nil
+}
+
+func (s *SQLite) GetMonitorTemplate(ctx context.Context, id int64) (*MonitorTemplate, error) {
+	var t MonitorTemplate
+	if err := s.scanMonitorTemplate(s.db.QueryRowContext(ctx,
+		`SELECT id, name, description, rules, channel_ids, parameters, created_at FROM monitor_templates WHERE id = ?`, id), &t); err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+func (s *SQLite) ListMonitorTemplates(ctx context.Context) ([]MonitorTemplate, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, name, description, rules, channel_ids, parameters, created_at FROM monitor_templates ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []MonitorTemplate
+	for rows.Next() {
+		var t MonitorTemplate
+		if err := s.scanMonitorTemplate(rows, &t); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLite) UpdateMonitorTemplate(ctx context.Context, t *MonitorTemplate) error {
+	rulesJSON, _ := json.Marshal(t.Rules)
+	channelJSON, _ := json.Marshal(t.ChannelIDs)
+	paramsJSON, _ := json.Marshal(t.Parameters)
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE monitor_templates SET name=?, description=?, rules=?, channel_ids=?, parameters=? WHERE id=?`,
+		t.Name, t.Description, string(rulesJSON), string(channelJSON), string(paramsJSON), t.ID)
+	if err != nil {
+		return mapSQLiteErr(err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *SQLite) DeleteMonitorTemplate(ctx context.Context, id int64) error {
+	return s.deleteByID(ctx, "monitor_templates", id)
+}
+
+// --- inhibitions ---
+
+// Mirrors the Postgres implementation, including the firing-window default.
+// created_at is TEXT in the fixed format; the RETURNING clause reads it back
+// so callers see the database-assigned stamp, exactly like CreateMonitor.
+
+func (s *SQLite) CreateInhibition(ctx context.Context, in *Inhibition) error {
+	if in.FiringWindowSeconds <= 0 {
+		in.FiringWindowSeconds = DefaultInhibitionWindowSeconds
+	}
+	var created string
+	if err := s.db.QueryRowContext(ctx,
+		`INSERT INTO alert_inhibitions (source_rule_id, target_rule_id, firing_window_seconds)
+		 VALUES (?, ?, ?) RETURNING created_at`,
+		in.SourceRuleID, in.TargetRuleID, in.FiringWindowSeconds,
+	).Scan(&created); err != nil {
+		return mapSQLiteErr(err)
+	}
+	createdAt, err := parseSQLiteTime(created)
+	if err != nil {
+		return err
+	}
+	in.CreatedAt = createdAt
+	return nil
+}
+
+func (s *SQLite) scanInhibition(r rowScanner, in *Inhibition) error {
+	var created string
+	if err := r.Scan(&in.SourceRuleID, &in.TargetRuleID, &in.FiringWindowSeconds, &created); err != nil {
+		return mapSQLiteErr(err)
+	}
+	createdAt, err := parseSQLiteTime(created)
+	if err != nil {
+		return err
+	}
+	in.CreatedAt = createdAt
+	return nil
+}
+
+func (s *SQLite) ListInhibitions(ctx context.Context) ([]Inhibition, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT source_rule_id, target_rule_id, firing_window_seconds, created_at
+		 FROM alert_inhibitions ORDER BY source_rule_id, target_rule_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []Inhibition
+	for rows.Next() {
+		var in Inhibition
+		if err := s.scanInhibition(rows, &in); err != nil {
+			return nil, err
+		}
+		out = append(out, in)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLite) ListInhibitionsForTarget(ctx context.Context, targetRuleID int64) ([]Inhibition, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT source_rule_id, target_rule_id, firing_window_seconds, created_at
+		 FROM alert_inhibitions WHERE target_rule_id = ? ORDER BY source_rule_id`, targetRuleID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []Inhibition
+	for rows.Next() {
+		var in Inhibition
+		if err := s.scanInhibition(rows, &in); err != nil {
+			return nil, err
+		}
+		out = append(out, in)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLite) DeleteInhibition(ctx context.Context, sourceRuleID, targetRuleID int64) error {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM alert_inhibitions WHERE source_rule_id = ? AND target_rule_id = ?`,
+		sourceRuleID, targetRuleID)
+	if err != nil {
+		return mapSQLiteErr(err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *SQLite) RuleFiredWithin(ctx context.Context, ruleID int64, window time.Duration) (bool, error) {
+	// Formatted with sqliteTimeString so the TEXT comparison is exact;
+	// the Postgres twin receives the same instant as a timestamptz.
+	cutoff := sqliteTimeString(time.Now().Add(-window).Truncate(time.Millisecond))
+	var count int64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM alerts WHERE rule_id = ? AND created_at >= ?`,
+		ruleID, cutoff).Scan(&count); err != nil {
+		return false, mapSQLiteErr(err)
+	}
+	return count > 0, nil
+}
+
+func (s *SQLite) MarkAlertInhibited(ctx context.Context, alertID, sourceRuleID int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE alerts SET inhibited_by_rule_id = ? WHERE id = ?`, sourceRuleID, alertID)
+	return mapSQLiteErr(err)
 }
