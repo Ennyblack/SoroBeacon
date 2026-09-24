@@ -8,6 +8,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"testing"
 	"time"
 
@@ -21,11 +22,30 @@ import (
 	"github.com/sorotrail/sorobeacon/internal/telemetry"
 )
 
+// postgresStore runs the shared Postgres factory and narrows its result to
+// the concrete backend. The harness returns the Store interface so the suite
+// stays backend-neutral, but the telemetry hook lives on *Postgres, so these
+// tracing tests need the type that owns store.create_alert.
+//
+// It skips rather than fails when TEST_DATABASE_URL is unset, matching the
+// rest of the store suite: CI's build job runs without a database and must
+// stay green, while CI's test-db job sets the variable and exercises these
+// paths for real.
+func postgresStore(t *testing.T) *Postgres {
+	t.Helper()
+	if os.Getenv("TEST_DATABASE_URL") == "" {
+		t.Skip("TEST_DATABASE_URL not set; skipping store integration tests")
+	}
+	p, ok := newTestPostgres(t).(*Postgres)
+	require.True(t, ok, "the Postgres conformance factory must return *Postgres")
+	return p
+}
+
 // tracedStore connects to the test database with tracing wired to an
 // in-memory exporter, returning the store plus the recorder.
 func tracedStore(t *testing.T) (*Postgres, *tracetest.SpanRecorder) {
 	t.Helper()
-	st := testStore(t)
+	st := postgresStore(t)
 
 	exp := tracetest.NewSpanRecorder()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(exp))
@@ -148,7 +168,7 @@ func TestCreateAlertSpanCarriesRequestID(t *testing.T) {
 
 func TestCreateAlertWithoutTelemetryNilSafe(t *testing.T) {
 	// The store's default wiring has no telemetry; nothing may panic.
-	st := testStore(t)
+	st := postgresStore(t)
 	ctx := context.Background()
 
 	m := &Monitor{Name: "untraced", ContractIDs: []string{"C"}, Enabled: true}
