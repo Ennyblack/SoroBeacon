@@ -554,7 +554,7 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 	}
 	data := map[string]any{
 		"Title": "Overview", "Stats": stats, "Alerts": alerts, "MonitorNames": names,
-		"Empty": emptyKind(monitors, channels, alerts),
+		"Empty":      emptyKind(monitors, channels, alerts),
 		"AlertChart": alertChartSVG(series),
 	}
 	if s.poller != nil {

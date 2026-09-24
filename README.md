@@ -35,6 +35,17 @@ Stellar RPC ──getEvents──▶ poller ──▶ decoder ──▶ rules en
 - The **dispatcher** fans each alert out to the monitor's channels with
   retries and exponential backoff, recording every delivery attempt.
 
+Reliability around the edges: each monitor carries a **poll priority**
+(`low`/`normal`/`high`, default `normal`) and the poller schedules high-priority
+contracts first with a weighted round-robin that never starves the low tier. A
+chain **reorganisation** is detected by re-reading recently ingested ledger
+hashes — a changed hash retracts the alerts derived from the orphaned range
+(kept and flagged, never deleted), and an optional confirmation depth can hold
+alerts until an event is buried. On Postgres, `alerts` is **range-partitioned
+by month**, so retention drops whole expired partitions instead of deleting row
+by row, and it can **archive** each batch to a directory or S3 before deleting
+it so a failed archive blocks the delete.
+
 ## Quickstart
 
 ```sh
@@ -85,6 +96,10 @@ vs optional, secrets, and `SOURCE_MODE`-only notes — is
 | `HTTP_MAX_BODY_BYTES` | `1048576` (1 MiB)                 | Max API write-body size; GET is unaffected   |
 | `CORS_ALLOWED_ORIGINS` | _(empty, CORS off)_             | Comma-separated browser Origins; empty disables CORS |
 | `MONITOR_SILENT_AFTER` | `24h`                            | Mark monitors silent on the dashboard after this much time since last match |
+| `ALERT_RETENTION` | _(unset, keep forever)_             | How long to keep alerts; `90d`, `24h`. Postgres drops whole expired partitions |
+| `ARCHIVE_URL`   | _(unset, off)_                         | Archive expired alerts before deletion (directory or `s3://bucket/prefix`) |
+| `REORG_TRACKING_WINDOW` | `128`                        | Recent ledger hashes tracked for reorg detection; `0` disables |
+| `REORG_CONFIRMATION_DEPTH` | `0`                       | Ledgers an event must be buried before it may alert |
 | `HTTP_ADDR`     | `:8080`                                | API + dashboard listen address               |
 | `LOG_LEVEL`     | `info`                                 | `debug` \| `info` \| `warn` \| `error`       |
 | `READYZ_LAG_THRESHOLD` | `0` (disabled)                  | Fail `/readyz` when poller ledger lag exceeds this; 0 leaves probes unchanged |
@@ -323,7 +338,9 @@ internal/store      Postgres (pgx) and SQLite backends + embedded
 internal/rules      RuleEvaluator interface + event_emitted, value_threshold,
                     token_event, frequency_threshold
 internal/notify     Notifier interface + 7 channels + retrying dispatcher
-internal/poller     ingest loop: poll -> decode -> match -> alert -> dispatch
+internal/archive    NDJSON archiver: local directory + S3 (SigV4)
+internal/poller     ingest loop: poll -> decode -> match -> alert -> dispatch,
+                    priority scheduling + ledger-reorg detection
 internal/api        chi JSON API
 internal/web        html/template + htmx dashboard
 ```
