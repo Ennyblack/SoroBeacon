@@ -414,6 +414,8 @@ func TestLogAttrsOptInDoesNotDumpWholeStruct(t *testing.T) {
 		"sorotrail_url",
 		"cors_allowed_origins",
 		"config_encryption_enabled",
+		"reorg_tracking_window",
+		"reorg_confirmation_depth",
 		"api_token_count",
 	}, keys)
 }
