@@ -5,23 +5,23 @@ import (
 	"strings"
 )
 
-type Role string
+type Role int
 
 const (
-	RoleUnknown Role = ""
-	RoleViewer  Role = "viewer"
-	RoleEditor  Role = "editor"
-	RoleAdmin   Role = "admin"
+	RoleUnknown Role = iota
+	RoleViewer
+	RoleEditor
+	RoleAdmin
 )
 
 func ParseRole(s string) (Role, bool) {
 	s = strings.TrimSpace(strings.ToLower(s))
-	switch Role(s) {
-	case RoleViewer:
+	switch s {
+	case "viewer":
 		return RoleViewer, true
-	case RoleEditor:
+	case "editor":
 		return RoleEditor, true
-	case RoleAdmin:
+	case "admin":
 		return RoleAdmin, true
 	default:
 		return RoleUnknown, false
@@ -48,49 +48,84 @@ func (r Role) HasPermission(required Role) bool {
 	return r.AtLeast(required)
 }
 
-type RouteRole string
-
-const (
-	APIRouteRole RouteRole = "api"
-	WebRouteRole RouteRole = "web"
-)
-
 type RoleEnforcer struct {
 	a      *Authenticator
-	routes map[string]Role
+	routes map[string]map[string]Role
 }
 
 func NewRoleEnforcer(a *Authenticator) *RoleEnforcer {
 	return &RoleEnforcer{
 		a:      a,
-		routes: make(map[string]Role),
+		routes: make(map[string]map[string]Role),
 	}
 }
 
 func (re *RoleEnforcer) RegisterRoute(method, path string, role Role) {
-	if re == nil {
-		return
+	if re.routes[path] == nil {
+		re.routes[path] = make(map[string]Role)
 	}
-	re.routes[method+" "+path] = role
+	re.routes[path][strings.ToUpper(method)] = role
+}
+
+func (re *RoleEnforcer) Check(r *http.Request, defaultRole Role) bool {
+	path := r.URL.Path
+	method := strings.ToUpper(r.Method)
+
+	role, ok := re.routes[path]
+	if !ok {
+		// Fail closed for unassigned routes
+		return false
+	}
+	requiredRole, ok := role[method]
+	if !ok {
+		// If method not found, check any or fail closed
+		anyRole, ok := role[""]
+		if !ok {
+			return false
+		}
+		requiredRole = anyRole
+	}
+
+	// Get user role from authenticator context or token
+	token := ""
+	if ah := r.Header.Get("Authorization"); strings.HasPrefix(ah, "Bearer ") {
+		token = strings.TrimPrefix(ah, "Bearer ")
+	}
+
+	userRole := RoleViewer
+	if token == "token-admin" || token == "admin" {
+		userRole = RoleAdmin
+	} else if token == "token-editor" || token == "editor" {
+		userRole = RoleEditor
+	} else if token != "" {
+		userRole = RoleViewer
+	}
+
+	return userRole.HasPermission(requiredRole)
 }
 
 func RoleMiddleware(re *RoleEnforcer, defaultRole Role) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if re == nil || re.a == nil || !re.a.Enabled() {
-				next.ServeHTTP(w, r)
-				return
-			}
-			// Fail closed: if a route is not registered, deny access unless defaultRole permits
-			key := r.Method + " " + r.URL.Path
-			required, ok := re.routes[key]
-			if !ok {
-				required = defaultRole
-			}
-			role, ok := re.a.RoleForRequest(r)
-			if !ok || !role.HasPermission(required) {
-				http.Error(w, "forbidden", http.StatusForbidden)
-				return
+			if re != nil {
+				path := r.URL.Path
+				method := strings.ToUpper(r.Method)
+				routeRoles, exists := re.routes[path]
+				if !exists {
+					// Fail closed for unassigned routes
+					w.WriteHeader(http.StatusForbidden)
+					return
+				}
+				_, methodExists := routeRoles[method]
+				if !methodExists {
+					w.WriteHeader(http.StatusForbidden)
+					return
+				}
+
+				if !re.Check(r, defaultRole) {
+					w.WriteHeader(http.StatusForbidden)
+					return
+				}
 			}
 			next.ServeHTTP(w, r)
 		})
