@@ -54,7 +54,11 @@ type Server struct {
 	// silentAfter is how long since last_matched_at before a monitor is
 	// marked silent on the list. Zero means the New default (24h).
 	silentAfter time.Duration
-	a *auth.Authenticator
+	// auth gates every page on a dashboard session once a token is
+	// configured. Nil (until WithAuth, or with no API_TOKEN) leaves the
+	// dashboard open.
+	a    *auth.Authenticator
+	auth *auth.Authenticator
 	roles *auth.RoleEnforcer
 }
 
@@ -299,9 +303,7 @@ func (s *Server) renderStatus(w http.ResponseWriter, r *http.Request, status int
 		// The sign-in page has nothing to sign out of, so it hides the header's
 		// sign-out button even though authentication is on.
 		m["AuthEnabled"] = s.authEnabled() && page != "login"
-		if s.auth != nil {
-			m["SessionHours"] = int(s.auth.SessionTTL().Hours())
-		}
+		m["SessionHours"] = int(s.auth.SessionTTL().Hours())
 		m["Version"] = displayVersion(buildinfo.Version)
 		m["Commit"] = displayCommit(buildinfo.Commit)
 		m["CommitURL"] = commitURL(buildinfo.Commit)
