@@ -1182,6 +1182,57 @@ func (s *SQLite) SetIngestState(ctx context.Context, st IngestState) error {
 	return err
 }
 
+// --- backfills ---
+
+func (s *SQLite) GetBackfill(ctx context.Context, monitorID int64) (Backfill, error) {
+	var b Backfill
+	var fromLedger, toLedger, nextLedger int64
+	var updated string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT monitor_id, from_ledger, to_ledger, next_ledger, cursor, deliver, complete, updated_at
+		   FROM backfills WHERE monitor_id = ?`, monitorID,
+	).Scan(&b.MonitorID, &fromLedger, &toLedger, &nextLedger, &b.Cursor, &b.Deliver, &b.Complete, &updated)
+	if err != nil {
+		return b, mapSQLiteErr(err)
+	}
+	b.FromLedger = uint32(fromLedger)
+	b.ToLedger = uint32(toLedger)
+	b.NextLedger = uint32(nextLedger)
+	if b.UpdatedAt, err = parseSQLiteTime(updated); err != nil {
+		return b, err
+	}
+	return b, nil
+}
+
+// UpsertBackfill writes the run's resume point, replacing any previous row for
+// the monitor. One row per monitor is what makes "resume where it stopped"
+// unambiguous.
+func (s *SQLite) UpsertBackfill(ctx context.Context, b *Backfill) error {
+	var updated string
+	err := s.db.QueryRowContext(ctx,
+		`INSERT INTO backfills (monitor_id, from_ledger, to_ledger, next_ledger, cursor, deliver, complete, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT (monitor_id) DO UPDATE SET
+		     from_ledger = excluded.from_ledger,
+		     to_ledger   = excluded.to_ledger,
+		     next_ledger = excluded.next_ledger,
+		     cursor      = excluded.cursor,
+		     deliver     = excluded.deliver,
+		     complete    = excluded.complete,
+		     updated_at  = excluded.updated_at
+		 RETURNING updated_at`,
+		b.MonitorID, int64(b.FromLedger), int64(b.ToLedger), int64(b.NextLedger),
+		b.Cursor, boolToInt(b.Deliver), boolToInt(b.Complete), sqliteTimeString(time.Now()),
+	).Scan(&updated)
+	if err != nil {
+		return mapSQLiteErr(err)
+	}
+	if b.UpdatedAt, err = parseSQLiteTime(updated); err != nil {
+		return err
+	}
+	return nil
+}
+
 // --- stats ---
 
 func (s *SQLite) GetStats(ctx context.Context) (Stats, error) {
