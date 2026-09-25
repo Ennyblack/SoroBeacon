@@ -6,6 +6,10 @@ import (
 	"github.com/sorotrail/sorobeacon/internal/auth"
 )
 
+func isProbePath(path string) bool {
+	return path == "/health" || path == "/livez" || path == "/readyz"
+}
+
 // AuthMiddleware requires a credential on every /api/v1 route once a token
 // is configured through API_TOKEN.
 func AuthMiddleware(a *auth.Authenticator) func(http.Handler) http.Handler {
@@ -77,8 +81,6 @@ func RequireRole(required auth.Role) func(http.Handler) http.Handler {
 		})
 	}
 }
-
-
 
 var authContextKey = &contextKey{"auth"}
 
