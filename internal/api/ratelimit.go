@@ -105,8 +105,6 @@ func clientKey(r *http.Request, trustForwarded bool) string {
 	return host
 }
 
-
-
 func isProbePath(path string) bool {
 	switch {
 	case strings.HasSuffix(path, "/health") ||
