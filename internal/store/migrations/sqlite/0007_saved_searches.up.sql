@@ -4,6 +4,10 @@
 -- order equals chronological order, and BOOLEAN becomes INTEGER 0/1. The
 -- partial unique index keeps at most one default row, mirroring the Postgres
 -- index, so "set this one default" stays a two-statement operation.
+-- SQLite equivalent of the Postgres 0007_saved_searches. JSONB becomes TEXT
+-- (queried with json_extract), timestamps use the fixed strftime format, and
+-- BOOLEAN becomes INTEGER 0/1. The partial unique index on the default row is
+-- supported by SQLite and keeps "exactly one default" true on both backends.
 CREATE TABLE saved_searches (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     name       TEXT    NOT NULL,

@@ -30,6 +30,11 @@ const (
 	// DefaultMonitorSilentAfter is how long since last_matched_at before
 	// the monitors list treats a monitor as silent.
 	DefaultMonitorSilentAfter = 24 * time.Hour
+	// DefaultReorgTrackingWindow is how many recent ledger hashes the poller
+	// keeps for reorg detection. 128 ledgers is roughly ten minutes on
+	// Stellar and a few getLedgers pages per cycle — cheap, and deep enough
+	// to cover the practical reorg depth.
+	DefaultReorgTrackingWindow uint32 = 128
 )
 
 // Config holds all runtime configuration. Every field maps to one
@@ -39,10 +44,15 @@ type Config struct {
 	// and RPC endpoint, resolved from NETWORK / RPC_URL /
 	// NETWORK_PASSPHRASE by ParseNetwork.
 	Network Network
-	// RPCURL is the Stellar RPC endpoint (JSON-RPC 2.0 over HTTP). This is
-	// Network.RPCURL; kept as a direct field since most call sites only
-	// need the URL.
+	// RPCURL is the first Stellar RPC endpoint (JSON-RPC 2.0 over HTTP).
+	// This is Network.RPCURL; kept as a direct field since most call sites
+	// only need the URL.
 	RPCURL string
+	// RPCURLs is the ordered list of Stellar RPC endpoints to poll, with
+	// failover in that order (RPC_URLS). It is always non-empty: RPC_URLS
+	// takes priority when set, and RPC_URL alone is the single-entry case,
+	// so a deployment that never sets RPC_URLS behaves exactly as before.
+	RPCURLs []string
 	// DatabaseURL is a Postgres connection string (pgx format).
 	DatabaseURL string
 	// DatabaseMaxConns is the pgx pool MaxConns. Zero means use the
@@ -116,6 +126,21 @@ type Config struct {
 	// no exporter goroutines, no measurable overhead — spans collapse to
 	// no-ops. When set it is the OTLP/HTTP base URL spans are shipped to.
 	OTLP OTLPConfig
+	// ReorgTrackingWindow is how many recent ledgers' hashes the poller keeps
+	// and re-checks each cycle for reorg detection
+	// (REORG_TRACKING_WINDOW, default 128). Zero disables detection, which is
+	// the behaviour before the feature existed.
+	ReorgTrackingWindow uint32
+	// ReorgConfirmationDepth is how many ledgers behind the tip an event must
+	// be before it may alert (REORG_CONFIRMATION_DEPTH, default 0). Zero
+	// alerts immediately, the historical default.
+	ReorgConfirmationDepth uint32
+	// ArchiveURL is where retention copies alerts before deleting them
+	// (ARCHIVE_URL). Empty (the default) leaves archiving off, so retention
+	// behaves exactly as it did before the feature. A local directory path,
+	// file://, dir:// or s3://bucket/prefix are accepted; the archive package
+	// validates it when the pruner is built.
+	ArchiveURL string
 }
 
 // OTLPConfig is the tracing slice of the configuration. It is a struct so a
@@ -148,12 +173,17 @@ func Load() (Config, error) {
 	cfg := Config{
 		Network:            net,
 		RPCURL:             net.RPCURL,
+		RPCURLs:            net.RPCURLs,
 		DatabaseURL:        os.Getenv("DATABASE_URL"),
 		PollInterval:       DefaultPollInterval,
 		HTTPAddr:           getenv("HTTP_ADDR", DefaultHTTPAddr),
 		HTTPMaxBodyBytes:   DefaultHTTPMaxBodyBytes,
 		LogLevel:           slog.LevelInfo,
 		MonitorSilentAfter: DefaultMonitorSilentAfter,
+		// Detection is on by default; confirmation depth off, so a monitor
+		// alerts exactly as soon as it did before this feature.
+		ReorgTrackingWindow:    DefaultReorgTrackingWindow,
+		ReorgConfirmationDepth: 0,
 	}
 
 	if err := validateDatabaseURL(cfg.DatabaseURL); err != nil {
@@ -170,10 +200,10 @@ func Load() (Config, error) {
 
 	// An absolute http(s) RPC URL is required whenever one is in play —
 	// always in rpc mode, and in sorotrail mode whenever RPC_URL is set
-	// alongside the indexer URL.
-	rpcURL, err := url.Parse(cfg.RPCURL)
-	if cfg.RPCURL != "" && (err != nil || !rpcURL.IsAbs() || rpcURL.Host == "" ||
-		(rpcURL.Scheme != "http" && rpcURL.Scheme != "https")) {
+	// alongside the indexer URL. cfg.RPCURL is RPC_URLS[0] when the list is
+	// set, so this covers both spellings; ParseRPCURLs validates the rest of
+	// the list (and each entry's own message names it).
+	if cfg.RPCURL != "" && !validRPCURL(cfg.RPCURL) {
 		return cfg, fmt.Errorf(
 			"invalid RPC_URL %q: must be an absolute http or https URL",
 			cfg.RPCURL,
@@ -316,6 +346,21 @@ func Load() (Config, error) {
 		}
 		cfg.AlertRetention = d
 	}
+	if v := os.Getenv("REORG_TRACKING_WINDOW"); v != "" {
+		n, err := strconv.ParseUint(v, 10, 32)
+		if err != nil {
+			return cfg, fmt.Errorf("invalid REORG_TRACKING_WINDOW %q: must be a non-negative integer", v)
+		}
+		cfg.ReorgTrackingWindow = uint32(n)
+	}
+	if v := os.Getenv("REORG_CONFIRMATION_DEPTH"); v != "" {
+		n, err := strconv.ParseUint(v, 10, 32)
+		if err != nil {
+			return cfg, fmt.Errorf("invalid REORG_CONFIRMATION_DEPTH %q: must be a non-negative integer", v)
+		}
+		cfg.ReorgConfirmationDepth = uint32(n)
+	}
+	cfg.ArchiveURL = strings.TrimSpace(os.Getenv("ARCHIVE_URL"))
 
 	// Tracing is off unless OTLP_ENDPOINT is set; see telemetry.Config.
 	cfg.OTLP.Endpoint = os.Getenv("OTLP_ENDPOINT")
@@ -375,9 +420,15 @@ func (c Config) LogAttrs() []slog.Attr {
 		slog.String("log_level", strings.ToLower(c.LogLevel.String())),
 		slog.String("network", c.Network.Name),
 		slog.String("rpc_url", c.RPCURL),
+		// The count, not the list: it is how an operator confirms at a
+		// glance that the failover set was read, and the URLs themselves
+		// already appear (first one above) in the poller's own lines.
+		slog.Int("rpc_endpoint_count", len(c.RPCURLs)),
 		slog.String("sorotrail_url", c.SoroTrailURL),
 		slog.String("cors_allowed_origins", strings.Join(c.CORSAllowedOrigins, ",")),
 		slog.Bool("config_encryption_enabled", len(c.ConfigEncryptionKey) > 0),
+		slog.Uint64("reorg_tracking_window", uint64(c.ReorgTrackingWindow)),
+		slog.Uint64("reorg_confirmation_depth", uint64(c.ReorgConfirmationDepth)),
 		// The count, never the tokens themselves: LogAttrs is the one place
 		// configuration is printed, and an API token is a credential.
 		slog.Int("api_token_count", len(c.APITokens)),
