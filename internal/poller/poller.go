@@ -68,10 +68,6 @@ type Poller struct {
 	ing *Ingestor
 	// metrics is optional instrumentation; nil-safe, see internal/metrics.
 	metrics *metrics.Metrics
-	// live is the optional SSE fan-out. When set, every alert this poller
-	// creates is published to it; nil (the New default) disables live
-	// alerts entirely.
-	live *broadcast.Broadcaster
 	// scanned/matched accumulate per-cycle counts for metrics.
 	scanned int
 	matched int
@@ -136,11 +132,12 @@ func (p *Poller) WithMetrics(m *metrics.Metrics) *Poller {
 }
 
 // WithPublisher attaches the live fan-out that serves the SSE endpoint. The
-// same Broadcaster is handed to internal/api: the poller publishes into it as
-// alerts are created and /alerts/stream reads out of it, so no database
-// round-trip is needed to see an alert appear on a connected dashboard.
+// same Broadcaster is handed to internal/api: the shared Ingestor publishes
+// into it as alerts are created and /alerts/stream reads out of it, so no
+// database round-trip is needed to see an alert appear on a connected
+// dashboard.
 func (p *Poller) WithPublisher(b *broadcast.Broadcaster) *Poller {
-	p.live = b
+	p.ing = p.ing.WithPublisher(b)
 	return p
 }
 
@@ -391,133 +388,5 @@ func (p *Poller) handleEvent(ctx context.Context, decoded *stellar.DecodedEvent,
 	if !watched {
 		return
 	}
-
-	for _, m := range monitors {
-		ruleList, err := p.store.ListRules(ctx, m.ID, true)
-		if err != nil {
-			p.log.Error("list rules", "monitor_id", m.ID, "err", err)
-			continue
-		}
-		for _, rule := range ruleList {
-			// The rule id rides in the context so a stateful evaluator (the
-			// frequency rule) can key its per-rule state.
-			ruleCtx := rules.WithRuleID(ctx, rule.ID)
-			matched, err := p.registry.Evaluate(ruleCtx, rule.Type, decoded, rule.Params)
-			if err != nil {
-				p.log.Warn("rule evaluation failed", "rule_id", rule.ID, "event_id", decoded.ID, "err", err)
-				continue
-			}
-			if matched {
-				p.matched++
-				p.metrics.RecordAlert()
-				// An evaluator may override the dedup key (the frequency rule
-				// stores every crossing in one episode under the window start).
-				eventID := decoded.ID
-				if id := p.registry.AlertEventID(ruleCtx, rule.Type, decoded, rule.Params); id != "" {
-					eventID = id
-				}
-				p.fireAlert(ctx, m, rule, decoded, eventID)
-			}
-		}
-	}
-}
-
-// fireAlert persists a deduped, cooldown-gated alert and hands it to the
-// dispatcher. The store owns both gates so they hold across poller instances
-// and restarts; this function only reports the outcome.
-func (p *Poller) fireAlert(ctx context.Context, m store.Monitor, rule store.Rule, ev *stellar.DecodedEvent, eventID string) {
-	body := map[string]any{
-		"contract_id":      ev.ContractID,
-		"event_name":       ev.EventName(),
-		"ledger":           ev.Ledger,
-		"ledger_closed_at": ev.LedgerClosedAt,
-		"tx_hash":          ev.TxHash,
-		"topics":           ev.Topics,
-		"value":            ev.Value,
-	}
-	// Named fields are only present when the contract's spec was available;
-	// without one the payload is byte-for-byte what it has always been.
-	if ev.Fields != nil {
-		body["fields"] = ev.Fields
-	}
-	payload, err := json.Marshal(body)
-	if err != nil {
-		p.log.Error("marshal alert payload", "event_id", ev.ID, "err", err)
-		return
-	}
-
-	alert := &store.Alert{
-		MonitorID:      m.ID,
-		RuleID:         rule.ID,
-		EventID:        eventID,
-		Payload:        payload,
-		Ledger:         ev.Ledger,
-		LedgerClosedAt: ev.LedgerClosedAt,
-		Cooldown:       ruleCooldown(rule),
-	}
-	outcome, err := p.store.CreateAlert(ctx, alert)
-	if err != nil {
-		p.log.Error("create alert", "rule_id", rule.ID, "event_id", ev.ID, "err", err)
-		return
-	}
-	switch outcome {
-	case store.AlertDuplicate:
-		return // dedup: this rule already fired for this event
-	case store.AlertSuppressed:
-		// Counted by the store; logged so an operator can see the rule is
-		// firing far more often than it is alerting.
-		p.log.Info("alert suppressed by cooldown",
-			"rule_id", rule.ID, "event_id", ev.ID, "cooldown", alert.Cooldown)
-		return
-	}
-	logAttrs := []any{"alert_id", alert.ID, "monitor", m.Name, "rule_id", rule.ID, "event_id", ev.ID}
-	if alert.SuppressedSinceLast > 0 {
-		logAttrs = append(logAttrs, "suppressed_since_last", alert.SuppressedSinceLast)
-	}
-	p.log.Info("alert created", logAttrs...)
-
-	// Publish before dispatching: a live dashboard should see the alert the
-	// moment it exists, not after the (possibly retried) channel fan-out.
-	// Only created alerts reach here — duplicates and cooldown-suppressed
-	// matches returned above — so the stream mirrors the alert table exactly.
-	if p.live != nil {
-		p.live.Publish(broadcast.Alert{
-			ID:          alert.ID,
-			MonitorID:   m.ID,
-			MonitorName: m.Name,
-			RuleID:      rule.ID,
-			EventID:     eventID,
-			Payload:     alert.Payload,
-			CreatedAt:   alert.CreatedAt,
-		})
-	}
-
-	p.dispatch.Dispatch(ctx, notify.Alert{
-		ID:          alert.ID,
-		MonitorID:   m.ID,
-		MonitorName: m.Name,
-		RuleID:      rule.ID,
-		RuleType:    rule.Type,
-		EventID:     eventID,
-		ContractID:  ev.ContractID,
-		EventName:   ev.EventName(),
-		Ledger:      ev.Ledger,
-		TxHash:      ev.TxHash,
-		// The store folds the suppressed count into the payload, so the
-		// notification reports it too.
-		Payload:   alert.Payload,
-		CreatedAt: alert.CreatedAt,
-	})
-}
-
-// ruleCooldown reads a rule's optional cooldown. It is validated when the rule
-// is created, so a value that no longer parses is treated as "no cooldown"
-// rather than dropping matches.
-func ruleCooldown(rule store.Rule) time.Duration {
-	d, err := rules.ParseCooldown(rule.Params)
-	if err != nil {
-		return 0
-	}
-	return d
 	p.matched += p.ing.Handle(ctx, decoded, monitors, HandleOptions{Deliver: true}).Matched
 }
