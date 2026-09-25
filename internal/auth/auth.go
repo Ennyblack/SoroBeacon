@@ -60,7 +60,7 @@ type Authenticator struct {
 	// mismatch, which would otherwise leak each configured token's length.
 	tokens []tokenEntry
 
-	tt      time.Duration
+	sessionTTL time.Duration
 	mu       sync.Mutex
 	sessions map[string]sessionInfo
 	now      func() time.Time
@@ -75,7 +75,7 @@ func New(tokens []string, ttl time.Duration) *Authenticator {
 		ttl = DefaultSessionTTL
 	}
 	a := &Authenticator{
-		tt:      ttl,
+		sessionTTL: ttl,
 		sessions: make(map[string]sessionInfo),
 		now:      time.Now,
 	}
@@ -104,10 +104,10 @@ func New(tokens []string, ttl time.Duration) *Authenticator {
 // reads it so the cookie it sets and the server-side session expire
 // together instead of drifting apart.
 func (a *Authenticator) SessionTTL() time.Duration {
-	if a == nil || a.ttl <= 0 {
+	if a == nil || a.sessionTTL <= 0 {
 		return DefaultSessionTTL
 	}
-	return a.ttl
+	return a.sessionTTL
 }
 
 // Enabled reports whether a token is configured. When it is not, both the
@@ -188,7 +188,7 @@ func (a *Authenticator) NewSessionWithRole(role Role) string {
 	defer a.mu.Unlock()
 	a.sweepLocked(a.now())
 	a.sessions[id] = sessionInfo{
-		expires: a.now().Add(a.ttl),
+		expires: a.now().Add(a.sessionTTL),
 		role:    role,
 	}
 	return id
