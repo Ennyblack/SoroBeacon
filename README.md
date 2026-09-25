@@ -188,7 +188,7 @@ curl -s -X DELETE localhost:8080/api/v1/monitors/1
 
 ### Rules
 
-Four rule types ship:
+Five rule types ship:
 
 **`event_emitted`** — match on event name (the first topic, by Soroban
 convention) and/or exact topic values:
@@ -260,6 +260,23 @@ curl -s -X POST localhost:8080/api/v1/monitors/1/rules -d '{
 
 See [docs/rules/frequency-threshold.md](docs/rules/frequency-threshold.md) for
 the re-arm semantics.
+
+**`topic_regex`** — match a regular expression against a decoded topic, at a
+given position or any topic when `position` is omitted. Real contracts emit
+families of events (`swap_exact_in`, `swap_exact_out`, `pool_deposit`, …) and
+one pattern covers the family. Patterns are unanchored RE2 matched within a
+topic's string value and are capped at 512 bytes; a position beyond an event's
+topic list simply doesn't match:
+
+```sh
+curl -s -X POST localhost:8080/api/v1/monitors/1/rules -d '{
+  "type": "topic_regex",
+  "params": {
+    "pattern": "^swap_",
+    "position": 0
+  }
+}'
+```
 
 Every rule type also accepts an optional `cooldown` (a Go duration string such
 as `"5m"`): the first match alerts, further matches in the window are counted
