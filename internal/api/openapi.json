@@ -589,6 +589,47 @@
         }
       }
     },
+    "/ingest": {
+      "post": {
+        "summary": "Receive a federated alert from another SoroBeacon instance",
+        "description": "Stores an alert forwarded by another instance without re-evaluating rules. The alert is stamped with its origin and hop count for loop prevention. Requires authentication.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["alert", "origin"],
+                "properties": {
+                  "alert": { "$ref": "#/components/schemas/Alert" },
+                  "origin": { "type": "string", "description": "Instance identifier of the originating SoroBeacon" },
+                  "hop_count": { "type": "integer", "minimum": 0, "maximum": 8, "description": "Number of hops this alert has traversed" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Alert ingested",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "outcome": { "type": "string", "enum": ["created", "duplicate", "suppressed"] },
+                    "alert_id": { "type": "integer", "format": "int64" },
+                    "origin": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
     "/health": {
       "get": {
         "summary": "Combined health report",
@@ -618,6 +659,23 @@
         "responses": {
           "200": { "description": "Ready" },
           "503": { "description": "At least one dependency unhealthy" }
+        }
+      }
+    },
+    "/poller": {
+      "get": {
+        "summary": "Poller position and lag",
+        "description": "Reports the last successful poll position, chain tip, ledger lag, and whether the poller is currently backing off. Before the first successful poll, position fields are omitted and status is waiting. No configuration values are returned.",
+        "responses": {
+          "200": {
+            "description": "Poller status",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PollerStatus" }
+              }
+            }
+          },
+          "503": { "description": "Poller is not configured" }
         }
       }
     },
@@ -1138,6 +1196,18 @@
           "version": { "type": "string" },
           "commit": { "type": "string" },
           "build_date": { "type": "string" }
+        }
+      },
+      "PollerStatus": {
+        "type": "object",
+        "required": ["status", "backing_off"],
+        "properties": {
+          "status": { "type": "string", "enum": ["waiting", "ok"] },
+          "last_processed_ledger": { "type": "integer", "format": "int64" },
+          "latest_chain_ledger": { "type": "integer", "format": "int64" },
+          "ledger_lag": { "type": "integer", "format": "int64" },
+          "last_successful_poll": { "type": "string", "format": "date-time" },
+          "backing_off": { "type": "boolean" }
         }
       },
       "MonitorTemplate": {

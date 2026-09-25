@@ -218,7 +218,7 @@ curl -s -X DELETE localhost:8080/api/v1/monitors/1
 
 ### Rules
 
-Four rule types ship:
+Five rule types ship:
 
 **`event_emitted`** — match on event name (the first topic, by Soroban
 convention) and/or exact topic values:
@@ -291,6 +291,23 @@ curl -s -X POST localhost:8080/api/v1/monitors/1/rules -d '{
 See [docs/rules/frequency-threshold.md](docs/rules/frequency-threshold.md) for
 the re-arm semantics.
 
+**`topic_regex`** — match a regular expression against a decoded topic, at a
+given position or any topic when `position` is omitted. Real contracts emit
+families of events (`swap_exact_in`, `swap_exact_out`, `pool_deposit`, …) and
+one pattern covers the family. Patterns are unanchored RE2 matched within a
+topic's string value and are capped at 512 bytes; a position beyond an event's
+topic list simply doesn't match:
+
+```sh
+curl -s -X POST localhost:8080/api/v1/monitors/1/rules -d '{
+  "type": "topic_regex",
+  "params": {
+    "pattern": "^swap_",
+    "position": 0
+  }
+}'
+```
+
 Every rule type also accepts an optional `cooldown` (a Go duration string such
 as `"5m"`): the first match alerts, further matches in the window are counted
 and dropped, and the next alert reports `suppressed_since_last`. It survives a
@@ -358,6 +375,53 @@ curl -s localhost:8080/api/v1/health
 curl -s localhost:8080/api/v1/stats
 ```
 
+## CLI
+
+The same binary doubles as a CLI for a running instance, so bootstrapping a
+deployment or changing it from a CI pipeline does not need curl scripts. The
+server starts when `sorobeacon` is run with no arguments; any argument makes
+it a client:
+
+```sh
+sorobeacon monitor list
+sorobeacon monitor create --name "My token" \
+  --contract CA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJUWDA --channel 1
+sorobeacon monitor get 1
+sorobeacon monitor disable 1
+sorobeacon monitor delete 1
+
+sorobeacon rule list 1
+sorobeacon rule add 1 --type frequency_threshold --param event_name=transfer \
+  --param count=50 --param window=5m
+sorobeacon rule delete 1 2
+
+sorobeacon channel list --type slack
+sorobeacon channel create --name ops-slack --type slack \
+  --config webhook_url=https://hooks.slack.com/services/...
+sorobeacon channel test 1
+sorobeacon channel delete 1
+```
+
+`--config` and `--param` take one `key=value` per flag, and a value is typed
+by its JSON spelling: `count=50` is a number, `window=5m` a string (quote a
+value that must stay a string) and `to=["ops@example.com"]` an array. For
+anything nested, `--config-json` and `--params` take a whole JSON object.
+
+The instance to talk to comes from `SOROBEACON_URL` (default
+`http://localhost:8080`) and can be overridden with `--url`; `SOROBEACON_TOKEN`
+or `--token` sends `Authorization: Bearer` for an instance with `API_TOKEN`
+set. Output is a readable table by default and JSON with `--json`, so a script
+can pipe it into `jq`. Failures print the API's error envelope message and
+exit non-zero, and a channel's `config` — webhook URLs, bot tokens, SMTP
+credentials — is never printed, since the API does not return it. Run
+`sorobeacon help` for the command list, or `sorobeacon monitor`, `sorobeacon
+rule` or `sorobeacon channel` for a group's own usage and flags.
+
+```sh
+sorobeacon monitor list --json
+sorobeacon monitor create --name "My token" --contract C... --json
+```
+
 ## Development
 
 ```sh
@@ -371,6 +435,7 @@ make up / down  # docker compose
 Layout:
 
 ```
+cmd/sorobeacon      wiring + graceful shutdown, CLI subcommands (cli*.go)
 cmd/sorobeacon      wiring + graceful shutdown
 internal/config     env config
 internal/telemetry  OpenTelemetry tracer setup (OTLP/HTTP; off by default)
@@ -382,6 +447,13 @@ internal/notify     Notifier interface + 7 channels + retrying dispatcher
 internal/poller     ingest loop: poll -> decode -> match -> alert -> dispatch
 internal/api        chi JSON API
 internal/web        html/template + htmx dashboard
+internal/apiclient  HTTP client for the API, shared by the CLI
+```
+
+`cmd/sorobeacon` also contains the CLI subcommands (`cli*.go`); they talk to a
+running instance only through `internal/apiclient`, so the CLI and the API
+cannot drift apart.
+
 ```
 
 ### Adding a notification channel

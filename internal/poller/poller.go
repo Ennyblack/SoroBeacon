@@ -4,7 +4,6 @@ package poller
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
 	"sync/atomic"
 	"time"
@@ -27,6 +26,7 @@ type Position struct {
 	LastProcessedLedger uint32
 	LatestChainLedger   uint32
 	LastSuccessfulPoll  time.Time
+	BackingOff          bool
 }
 
 // Ready reports whether a successful poll has completed.
@@ -64,9 +64,11 @@ type Poller struct {
 	source   EventSource
 	store    Store
 	registry *rules.Registry
-	dispatch Dispatcher
 	interval time.Duration
 	log      *slog.Logger
+	// ing evaluates events and records alerts; shared with the backfill job
+	// so a historical replay and live ingestion match identically.
+	ing *Ingestor
 	// metrics is optional instrumentation; nil-safe, see internal/metrics.
 	metrics *metrics.Metrics
 	// telemetry is optional tracing; nil-safe like metrics. When set, every
@@ -109,6 +111,12 @@ func (p *Poller) recordPosition(processed, latest uint32, at time.Time) {
 	})
 }
 
+func (p *Poller) recordBackoff(backingOff bool) {
+	position := p.Position()
+	position.BackingOff = backingOff
+	p.pos.Store(position)
+}
+
 // New wires a Poller. src is where events come from: NewRPCSource for a
 // Stellar RPC node, or the SoroTrail source for upstream mode.
 func New(src EventSource, st Store, reg *rules.Registry, d Dispatcher, interval time.Duration, log *slog.Logger) *Poller {
@@ -116,9 +124,9 @@ func New(src EventSource, st Store, reg *rules.Registry, d Dispatcher, interval 
 		source:   src,
 		store:    st,
 		registry: reg,
-		dispatch: d,
 		interval: interval,
 		log:      log,
+		ing:      NewIngestor(st, reg, d, log),
 		sched:    NewScheduler(),
 	}
 }
@@ -126,6 +134,7 @@ func New(src EventSource, st Store, reg *rules.Registry, d Dispatcher, interval 
 // WithMetrics attaches Prometheus instrumentation to the poll loop.
 func (p *Poller) WithMetrics(m *metrics.Metrics) *Poller {
 	p.metrics = m
+	p.ing = p.ing.WithMetrics(m)
 	return p
 }
 
@@ -168,10 +177,12 @@ func (p *Poller) Run(ctx context.Context) {
 				continue
 			}
 			delay = min(delay*2, 10*p.interval)
+			p.recordBackoff(true)
 			p.log.Error("poll failed", "err", err, "retry_in", delay)
 			continue
 		}
 		delay = p.interval
+		p.recordBackoff(false)
 	}
 }
 
@@ -415,6 +426,9 @@ func (p *Poller) Poll(ctx context.Context) error {
 // ingestion. Rule evaluation spans come from the registry, one per rule,
 // each a child of the cycle span, on the same trace as the fetch page that
 // produced the event.
+// handleEvent runs every enabled rule of every monitor watching the event's
+// contract. Events arrive already decoded from the source; the shared
+// Ingestor owns evaluation, alert persistence and dispatch.
 func (p *Poller) handleEvent(ctx context.Context, decoded *stellar.DecodedEvent, byContract map[string][]store.Monitor) {
 	monitors, watched := byContract[decoded.ContractID]
 	if !watched {
@@ -550,4 +564,5 @@ func ruleCooldown(rule store.Rule) time.Duration {
 		return 0
 	}
 	return d
+	p.matched += p.ing.Handle(ctx, decoded, monitors, HandleOptions{Deliver: true}).Matched
 }
