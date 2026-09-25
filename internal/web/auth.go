@@ -73,7 +73,28 @@ func (s *Server) WithAuth(a *auth.Authenticator) *Server {
 }
 
 func (s *Server) authEnabled() bool {
-	return s.auth.Enabled()
+	return s.auth != nil && s.auth.Enabled()
+}
+
+func (s *Server) requireRoleWeb(required auth.Role) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if s.auth == nil || !s.auth.Enabled() {
+				next.ServeHTTP(w, r)
+				return
+			}
+			role := s.auth.RoleForRequest(r)
+			if !role.HasPermission(required) {
+				s.renderStatus(w, r, http.StatusForbidden, "error", map[string]any{
+					"Title":   "Forbidden",
+					"Heading": "Access Denied",
+					"Message": "Your role does not have permission to perform this action.",
+				})
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 // authMiddleware gates every dashboard route on a live session. Exempt paths

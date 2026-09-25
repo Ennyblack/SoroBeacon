@@ -222,6 +222,7 @@ func (s *Server) Routes() chi.Router {
 	// Registered before any route, so the gate covers everything below it.
 	// With no token configured it is the identity function.
 	r.Use(s.authMiddleware())
+	r.Use(s.roleMiddleware())
 	r.Get(loginPath, s.loginPage)
 	r.Post(loginPath, s.login)
 	r.Post(logoutPath, s.logout)
