@@ -57,8 +57,8 @@ type Server struct {
 	// auth gates every page on a dashboard session once a token is
 	// configured. Nil (until WithAuth, or with no API_TOKEN) leaves the
 	// dashboard open.
-	a    *auth.Authenticator
-	auth *auth.Authenticator
+	a     *auth.Authenticator
+	auth  *auth.Authenticator
 	roles *auth.RoleEnforcer
 }
 
