@@ -64,8 +64,7 @@ func RequireRole(required auth.Role) func(http.Handler) http.Handler {
 			if ok && authObj != nil {
 				role, _ = authObj.RoleForRequest(r)
 			} else {
-				rolenamed := auth.Role("")
-				role = rolenamed
+				role = auth.RoleUnknown
 			}
 			if !role.HasPermission(required) {
 				writeErr(w, r, http.StatusForbidden, "forbidden")
