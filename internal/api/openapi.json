@@ -20,6 +20,10 @@
     "/monitors": {
       "post": {
         "summary": "Create a monitor",
+        "description": "Requires editor role.",
+        "requestBody": {
+      "post": {
+        "summary": "Create a monitor",
         "requestBody": {
           "required": true,
           "content": {
