@@ -19,10 +19,7 @@
   "paths": {
     "/monitors": {
       "post": {
-        "summary": "Create a monitor",
-        "description": "Requires editor role.",
-        "requestBody": {
-      "post": {
+        "description": "Required role: editor",
         "summary": "Create a monitor",
         "requestBody": {
           "required": true,
@@ -45,6 +42,7 @@
         }
       },
       "get": {
+        "description": "Required role: viewer",
         "summary": "List monitors",
         "parameters": [
           {
@@ -91,6 +89,7 @@
     },
     "/monitors/bulk": {
       "post": {
+        "description": "Required role: editor",
         "summary": "Bulk enable or disable monitors",
         "description": "Sets enabled on an explicit list of monitor IDs in one statement. Unknown IDs are returned and do not prevent the known ones from applying. There is no all-monitors shorthand.",
         "requestBody": {
