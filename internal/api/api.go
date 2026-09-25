@@ -123,7 +123,7 @@ func (s *Server) Routes() chi.Router {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer, MaxBodyMiddleware(s.maxBodyBytes))
 	r.Use(AuthMiddleware(s.auth))
-	r.Use(auth.RoleMiddleware(s.roles, auth.APIRouteRole))
+	r.Use(auth.RoleMiddleware(s.roles, auth.RoleViewer))
 	r.Use(RateLimitMiddleware(s.rateLimit))
 	// JSON clients hitting a typo'd path or the wrong method should get
 	// the same envelope as every other API error, not chi's plain-text
