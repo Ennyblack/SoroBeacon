@@ -354,6 +354,7 @@ client never blocks alert creation: each subscriber has a buffered queue and,
 when it fills, the oldest pending event is dropped — the loss is counted by
 `sorobeacon_alerts_stream_dropped_total` on `/metrics`. The alerts page in the
 dashboard subscribes to this endpoint and appends new alerts live.
+
 ## CLI
 
 The same binary doubles as a CLI for a running instance, so bootstrapping a

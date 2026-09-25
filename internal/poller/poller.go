@@ -132,6 +132,9 @@ func (p *Poller) WithMetrics(m *metrics.Metrics) *Poller {
 // round-trip is needed to see an alert appear on a connected dashboard.
 func (p *Poller) WithPublisher(b *broadcast.Broadcaster) *Poller {
 	p.live = b
+	return p
+}
+
 // WithReorg enables reorg detection over a window of `window` recent ledgers
 // and holds alerts until they are `depth` ledgers behind the tip. window 0
 // disables detection and depth 0 alerts immediately: both defaults reproduce

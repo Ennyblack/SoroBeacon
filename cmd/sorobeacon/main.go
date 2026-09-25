@@ -185,9 +185,7 @@ func run() error {
 	m.RegisterStreamDropped(liveAlerts.Dropped)
 	p := poller.New(src, st, registry, dispatcher, cfg.PollInterval, log).
 		WithMetrics(m).
-		WithPublisher(liveAlerts)
-	p := poller.New(src, st, registry, dispatcher, cfg.PollInterval, log).
-		WithMetrics(m).
+		WithPublisher(liveAlerts).
 		WithReorg(cfg.ReorgTrackingWindow, cfg.ReorgConfirmationDepth)
 
 	// HTTP: JSON API under /api/v1, dashboard at /.
