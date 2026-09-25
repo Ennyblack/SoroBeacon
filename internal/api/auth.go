@@ -54,9 +54,7 @@ func RoleMiddleware(a *auth.Authenticator) func(http.Handler) http.Handler {
 	}
 }
 
-func isProbePath(path string) bool {
-	return path == "/health" || path == "/livez" || path == "/readyz"
-}
+
 
 // RequireRole returns middleware that enforces minimum role permissions (fail-closed).
 func RequireRole(required auth.Role) func(http.Handler) http.Handler {
@@ -79,6 +77,8 @@ func RequireRole(required auth.Role) func(http.Handler) http.Handler {
 		})
 	}
 }
+
+
 
 var authContextKey = &contextKey{"auth"}
 
