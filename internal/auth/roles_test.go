@@ -57,7 +57,7 @@ func TestRoleMiddlewareFailClosedAndUnassigned(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	// Unassigned route should fail closed (403)
+	// Unassigned route should fail closed (403) by default
 	reqUnassigned := httptest.NewRequest("GET", "/api/v1/unknown-route", nil)
 	reqUnassigned.Header.Set("Authorization", "Bearer token-admin")
 	recUnassigned := httptest.NewRecorder()
