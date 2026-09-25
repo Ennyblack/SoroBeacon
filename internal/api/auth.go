@@ -1,14 +1,11 @@
 package api
 
 import (
+	"strings"
 	"net/http"
 
 	"github.com/sorotrail/sorobeacon/internal/auth"
 )
-
-func isProbePath(path string) bool {
-	return path == "/health" || path == "/livez" || path == "/readyz"
-}
 
 // AuthMiddleware requires a credential on every /api/v1 route once a token
 // is configured through API_TOKEN.
@@ -58,7 +55,16 @@ func RoleMiddleware(a *auth.Authenticator) func(http.Handler) http.Handler {
 	}
 }
 
-
+func isProbePath(path string) bool {
+	switch {
+	case strings.HasSuffix(path, "/health"),
+		strings.HasSuffix(path, "/livez"),
+		strings.HasSuffix(path, "/readyz"):
+		return true
+	default:
+		return false
+	}
+}
 
 // RequireRole returns middleware that enforces minimum role permissions (fail-closed).
 func RequireRole(required auth.Role) func(http.Handler) http.Handler {
