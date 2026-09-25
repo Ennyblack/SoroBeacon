@@ -49,7 +49,7 @@ func TestRoleHierarchy(t *testing.T) {
 }
 
 func TestRoleMiddlewareFailClosedAndUnassigned(t *testing.T) {
-	a := New(map[string]Role{"token-admin": RoleAdmin})
+	a := New([]string{"token-admin:admin"}, 0)
 	re := NewRoleEnforcer(a)
 	re.RegisterRoute("GET", "/api/v1/safe", RoleViewer)
 
