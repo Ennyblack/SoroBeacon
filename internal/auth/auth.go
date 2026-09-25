@@ -75,8 +75,8 @@ func New(tokens []string, ttl time.Duration) *Authenticator {
 		ttl = DefaultSessionTTL
 	}
 	a := &Authenticator{
-	tt:       ttl,
-	sessions: make(map[string]sessionInfo),
+		tt:       ttl,
+		sessions: make(map[string]sessionInfo),
 		now:      time.Now,
 	}
 	for _, t := range tokens {
@@ -109,8 +109,6 @@ func (a *Authenticator) SessionTTL() time.Duration {
 	}
 	return a.tt
 }
-
-
 
 // Enabled reports whether a token is configured. When it is not, both the
 // API and the dashboard stay open: the middlewares step aside entirely and
@@ -266,7 +264,8 @@ func SessionID(r *http.Request) string {
 // dashboard's own same-origin calls such as the CSV export link, which
 // cannot attach a header).
 func (a *Authenticator) Authenticated(r *http.Request) bool {
-	return a.RoleForRequest(r).HasPermission(RoleViewer)
+	role, ok := a.RoleForRequest(r)
+	return ok && role.HasPermission(RoleViewer)
 }
 
 // RoleForRequest determines the effective Role for an HTTP request.
