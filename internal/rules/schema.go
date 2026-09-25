@@ -102,3 +102,10 @@ func (*FrequencyThreshold) ParamSchema() []FieldSchema {
 		{Name: "window", Type: "string", Required: true, Description: "Rolling window duration (e.g. 5m, 1h)"},
 	}
 }
+
+func (*TopicRegex) ParamSchema() []FieldSchema {
+	return []FieldSchema{
+		{Name: "pattern", Type: "string", Required: true, Description: "Regular expression matched against a topic (e.g. ^swap_)"},
+		{Name: "position", Type: "number", Description: "Topic position to match (0 is the event name); omitted matches any topic"},
+	}
+}
