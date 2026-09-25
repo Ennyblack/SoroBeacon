@@ -23,6 +23,7 @@
 * [value\_threshold](rules/value-threshold.md)
 * [token\_event](rules/token-event.md)
 * [frequency\_threshold](rules/frequency-threshold.md)
+* [topic\_regex](rules/topic-regex.md)
 * [Rule cooldown](rules/cooldown.md)
 
 ## 📣 Channel reference
