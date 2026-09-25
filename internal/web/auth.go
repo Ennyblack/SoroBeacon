@@ -68,33 +68,13 @@ func sessionCookie(id string, secure bool, ttl time.Duration) *http.Cookie {
 // is what an unset API_TOKEN produces — leaves the dashboard open, exactly as
 // it was before authentication existed.
 func (s *Server) WithAuth(a *auth.Authenticator) *Server {
+	s.a = a
 	s.auth = a
 	return s
 }
 
 func (s *Server) authEnabled() bool {
-	return s.auth != nil && s.auth.Enabled()
-}
-
-func (s *Server) requireRoleWeb(required auth.Role) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if s.auth == nil || !s.auth.Enabled() {
-				next.ServeHTTP(w, r)
-				return
-			}
-			role := s.auth.RoleForRequest(r)
-			if !role.HasPermission(required) {
-				s.renderStatus(w, r, http.StatusForbidden, "error", map[string]any{
-					"Title":   "Forbidden",
-					"Heading": "Access Denied",
-					"Message": "Your role does not have permission to perform this action.",
-				})
-				return
-			}
-			next.ServeHTTP(w, r)
-		})
-	}
+	return s.auth.Enabled()
 }
 
 // authMiddleware gates every dashboard route on a live session. Exempt paths
