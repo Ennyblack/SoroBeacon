@@ -55,8 +55,8 @@ type Server struct {
 	// auth verifies bearer tokens and dashboard sessions. Nil (the New
 	// default until WithAuth is called, or when no API_TOKEN is set) means
 	// every request is allowed.
-	a    *auth.Authenticator
-	auth *auth.Authenticator
+	a     *auth.Authenticator
+	auth  *auth.Authenticator
 	roles *auth.RoleEnforcer
 }
 
@@ -102,6 +102,7 @@ func (s *Server) WithRateLimit(cfg RateLimitConfig) *Server {
 // existed. main builds one authenticator and shares it with the dashboard,
 // so a session minted at /login also satisfies this middleware.
 func (s *Server) WithAuth(a *auth.Authenticator) *Server {
+	s.a = a
 	s.auth = a
 	return s
 }
