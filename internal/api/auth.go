@@ -1,8 +1,8 @@
 package api
 
 import (
-	"strings"
 	"net/http"
+	"strings"
 
 	"github.com/sorotrail/sorobeacon/internal/auth"
 )
@@ -45,24 +45,13 @@ func RoleMiddleware(a *auth.Authenticator) func(http.Handler) http.Handler {
 			case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
 				required = auth.RoleEditor
 			}
-			role := a.RoleForRequest(r)
+			role, _ := a.RoleForRequest(r)
 			if !role.HasPermission(required) {
 				writeErr(w, r, http.StatusForbidden, "forbidden")
 				return
 			}
 			next.ServeHTTP(w, r)
 		})
-	}
-}
-
-func isProbePath(path string) bool {
-	switch {
-	case strings.HasSuffix(path, "/health"),
-		strings.HasSuffix(path, "/livez"),
-		strings.HasSuffix(path, "/readyz"):
-		return true
-	default:
-		return false
 	}
 }
 
@@ -74,7 +63,7 @@ func RequireRole(required auth.Role) func(http.Handler) http.Handler {
 			// If auth is not in context, fall back to checking if global auth permits or fail-closed if unauthenticated
 			var role auth.Role
 			if ok && authObj != nil {
-				role = authObj.RoleForRequest(r)
+				role, _ = authObj.RoleForRequest(r)
 			} else {
 				rolenamed := auth.Role("")
 				role = rolenamed
@@ -92,4 +81,15 @@ var authContextKey = &contextKey{"auth"}
 
 type contextKey struct {
 	name string
+}
+
+func isProbePath(path string) bool {
+	switch {
+	case strings.HasSuffix(path, "/health") ||
+		strings.HasSuffix(path, "/livez") ||
+		strings.HasSuffix(path, "/readyz"):
+		return true
+	default:
+		return false
+	}
 }
