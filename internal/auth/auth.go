@@ -146,7 +146,7 @@ func (a *Authenticator) verifyToken(candidate string) (Role, bool) {
 	if match == 1 {
 		return matchedRole, true
 	}
-	return "", false
+	return RoleUnknown, false
 }
 
 // Bearer extracts the token from an Authorization header value. The scheme
@@ -211,17 +211,17 @@ func (a *Authenticator) HasSession(id string) bool {
 
 func (a *Authenticator) getSessionRole(id string) (Role, bool) {
 	if a == nil || id == "" {
-		return "", false
+		return RoleUnknown, false
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	info, ok := a.sessions[id]
 	if !ok {
-		return "", false
+		return RoleUnknown, false
 	}
 	if !a.now().Before(info.expires) {
 		delete(a.sessions, id)
-		return "", false
+		return RoleUnknown, false
 	}
 	return info.role, true
 }
