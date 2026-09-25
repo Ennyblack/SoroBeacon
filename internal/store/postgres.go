@@ -116,16 +116,20 @@ func (p *Postgres) GetMonitor(ctx context.Context, id int64) (*Monitor, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := p.pool.Query(ctx,
-		`SELECT channel_id FROM monitor_channels WHERE monitor_id = $1 ORDER BY channel_id`, id)
-	if err != nil {
-		return nil, err
-	}
-	m.ChannelIDs, err = pgx.CollectRows(rows, pgx.RowTo[int64])
+	m.ChannelIDs, err = p.monitorChannelIDs(ctx, id)
 	if err != nil {
 		return nil, err
 	}
 	return m, nil
+}
+
+func (p *Postgres) monitorChannelIDs(ctx context.Context, monitorID int64) ([]int64, error) {
+	rows, err := p.pool.Query(ctx,
+		`SELECT channel_id FROM monitor_channels WHERE monitor_id = $1 ORDER BY channel_id`, monitorID)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[int64])
 }
 
 func (p *Postgres) ListMonitors(ctx context.Context, enabledOnly bool) ([]Monitor, error) {
@@ -565,6 +569,32 @@ func (p *Postgres) UpdateChannel(ctx context.Context, c *Channel) error {
 
 func (p *Postgres) DeleteChannel(ctx context.Context, id int64) error {
 	return p.deleteByID(ctx, "channels", id)
+}
+
+func (p *Postgres) ListMonitorsForChannel(ctx context.Context, channelID int64) ([]Monitor, error) {
+	rows, err := p.pool.Query(ctx,
+		`SELECT m.id, m.name, m.contract_ids, m.enabled, m.created_at, m.last_matched_at, m.priority
+		 FROM monitors m
+		 JOIN monitor_channels mc ON mc.monitor_id = m.id
+		 WHERE mc.channel_id = $1
+		 ORDER BY m.id`, channelID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Monitor
+	for rows.Next() {
+		m, err := scanMonitor(rows)
+		if err != nil {
+			return nil, err
+		}
+		m.ChannelIDs, err = p.monitorChannelIDs(ctx, m.ID)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *m)
+	}
+	return out, rows.Err()
 }
 
 func (p *Postgres) ListChannelsForMonitor(ctx context.Context, monitorID int64) ([]Channel, error) {
