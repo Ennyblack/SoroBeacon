@@ -2,7 +2,6 @@ package api
 
 import (
 	"net/http"
-	"strings"
 
 	"github.com/sorotrail/sorobeacon/internal/auth"
 )
@@ -81,15 +80,4 @@ var authContextKey = &contextKey{"auth"}
 
 type contextKey struct {
 	name string
-}
-
-func isProbePath(path string) bool {
-	switch {
-	case strings.HasSuffix(path, "/health") ||
-		strings.HasSuffix(path, "/livez") ||
-		strings.HasSuffix(path, "/readyz"):
-		return true
-	default:
-		return false
-	}
 }
