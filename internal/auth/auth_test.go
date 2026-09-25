@@ -167,8 +167,8 @@ func TestHasSessionExpiresAndDrops(t *testing.T) {
 
 func TestZeroTTLFallsBackToDefault(t *testing.T) {
 	a := New([]string{"s3cret"}, 0)
-	if a.ttl != DefaultSessionTTL {
-		t.Fatalf("ttl = %v, want %v", a.ttl, DefaultSessionTTL)
+	if a.sessionTTL != DefaultSessionTTL {
+		t.Fatalf("sessionTTL = %v, want %v", a.sessionTTL, DefaultSessionTTL)
 	}
 }
 
