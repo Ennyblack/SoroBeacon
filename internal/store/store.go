@@ -144,6 +144,10 @@ type Alert struct {
 	// previous alert. CreateAlert also folds it into Payload so the stored
 	// alert and the dispatched notification both report it.
 	SuppressedSinceLast int64 `json:"-"`
+	// Backfilled marks an alert produced by a historical replay (see
+	// internal/backfill) rather than live ingestion. It is persisted so an
+	// operator can tell a replayed match from a real-time one.
+	Backfilled bool `json:"backfilled"`
 }
 
 // AlertOutcome reports what CreateAlert did with a match.
@@ -189,6 +193,25 @@ type DeliveryAttempt struct {
 type IngestState struct {
 	LastLedger uint32    `json:"last_ledger"`
 	LastCursor string    `json:"last_cursor"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+// Backfill is the persisted progress of a historical replay for one monitor.
+// A monitor has at most one row: an interrupted run resumes from
+// NextLedger/Cursor instead of starting over. Complete marks a finished run,
+// which a later backfill of the same monitor replaces.
+type Backfill struct {
+	MonitorID int64 `json:"monitor_id"`
+	// FromLedger and ToLedger are the inclusive range the run covers, kept so
+	// a resumed run reports the window it actually replayed.
+	FromLedger uint32 `json:"from_ledger"`
+	ToLedger   uint32 `json:"to_ledger"`
+	// NextLedger is the ledger to (re)request when a run restarts; Cursor is
+	// the source's opaque resume token from the last completed page.
+	NextLedger uint32    `json:"next_ledger"`
+	Cursor     string    `json:"cursor"`
+	Deliver    bool      `json:"deliver"`
+	Complete   bool      `json:"complete"`
 	UpdatedAt  time.Time `json:"updated_at"`
 }
 
@@ -404,6 +427,14 @@ type Ingest interface {
 	SetIngestState(ctx context.Context, s IngestState) error
 }
 
+// Backfills persists historical replay progress, so an interrupted backfill
+// resumes where it stopped instead of replaying the whole range. GetBackfill
+// returns ErrNotFound when the monitor has never been backfilled.
+type Backfills interface {
+	GetBackfill(ctx context.Context, monitorID int64) (Backfill, error)
+	UpsertBackfill(ctx context.Context, b *Backfill) error
+}
+
 // SavedSearch is a named, reusable alert filter combination.
 type SavedSearch struct {
 	ID        int64             `json:"id"`
@@ -469,6 +500,19 @@ type MonitorTemplates interface {
 	DeleteMonitorTemplate(ctx context.Context, id int64) error
 }
 
+// BackupChannel is a Channel with its Config included for configuration
+// export. The normal Channel tags Config with json:"-" to prevent leaks
+// through the API; the backup path needs the decrypted config and controls
+// its own output.
+type BackupChannel struct {
+	ID        int64           `json:"id"`
+	Name      string          `json:"name"`
+	Type      string          `json:"type"`
+	Config    json.RawMessage `json:"config"`
+	Enabled   bool            `json:"enabled"`
+	CreatedAt time.Time       `json:"created_at"`
+}
+
 // Store is everything the application needs from persistence.
 type Store interface {
 	Monitors
@@ -476,6 +520,7 @@ type Store interface {
 	Channels
 	Alerts
 	Ingest
+	Backfills
 	Ledgers
 	SavedSearches
 	MonitorTemplates

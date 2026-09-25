@@ -5,12 +5,12 @@ import "encoding/json"
 // FieldSchema describes one parameter field a rule type accepts, used by the
 // interactive rule builder to generate a form instead of requiring raw JSON.
 type FieldSchema struct {
-	Name        string `json:"name"`
-	Type        string `json:"type"` // "string", "number", "object", "select"
-	Required    bool   `json:"required"`
-	Description string `json:"description"`
+	Name        string   `json:"name"`
+	Type        string   `json:"type"` // "string", "number", "object", "select"
+	Required    bool     `json:"required"`
+	Description string   `json:"description"`
 	Options     []string `json:"options,omitempty"`
-	Default     string `json:"default,omitempty"`
+	Default     string   `json:"default,omitempty"`
 }
 
 // SchemaProvider is implemented by evaluators that can describe their params
