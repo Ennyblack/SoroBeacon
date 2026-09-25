@@ -1,7 +1,6 @@
 package auth
 
 import (
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -169,7 +168,7 @@ func TestHasSessionExpiresAndDrops(t *testing.T) {
 func TestZeroTTLFallsBackToDefault(t *testing.T) {
 	a := New([]string{"s3cret"}, 0)
 	if a.SessionTTL() != DefaultSessionTTL {
-		fmt.Fatalf("SessionTTL() = %v, want %v", a.SessionTTL(), DefaultSessionTTL)
+		t.Fatalf("SessionTTL() = %v, want %v", a.SessionTTL(), DefaultSessionTTL)
 	}
 }
 
