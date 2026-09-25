@@ -88,18 +88,13 @@ type fakeStore struct {
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		rules:      map[int64][]store.Rule{},
-		dedup:      map[string]bool{},
-		attached:   map[int64][]int64{},
-		now:        time.Now,
-		lastFired:  map[int64]time.Time{},
-		suppressed: map[int64]int64{},
-		ledgerHashes: map[uint32]string{},
 		rules:        map[int64][]store.Rule{},
 		dedup:        map[string]bool{},
+		attached:     map[int64][]int64{},
 		now:          time.Now,
 		lastFired:    map[int64]time.Time{},
 		suppressed:   map[int64]int64{},
+		ledgerHashes: map[uint32]string{},
 	}
 }
 

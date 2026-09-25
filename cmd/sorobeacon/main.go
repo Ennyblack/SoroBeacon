@@ -208,8 +208,6 @@ func run() error {
 			return records, nil
 		})))
 	factory := notify.DefaultFactory()
-	dispatcher := notify.NewDispatcher(st, factory, log).WithMetrics(m).WithTelemetry(tel)
-	p := poller.New(src, st, registry.WithTelemetry(tel), dispatcher, cfg.PollInterval, log).WithMetrics(m).WithTelemetry(tel)
 	dispatcher := notify.NewDispatcher(st, factory, log).WithMetrics(m)
 	p := poller.New(src, st, registry, dispatcher, cfg.PollInterval, log).
 		WithMetrics(m).

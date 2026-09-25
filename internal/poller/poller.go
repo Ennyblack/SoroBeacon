@@ -4,6 +4,7 @@ package poller
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"sync/atomic"
 	"time"
@@ -66,6 +67,8 @@ type Poller struct {
 	registry *rules.Registry
 	interval time.Duration
 	log      *slog.Logger
+	// dispatch receives every newly created alert.
+	dispatch Dispatcher
 	// ing evaluates events and records alerts; shared with the backfill job
 	// so a historical replay and live ingestion match identically.
 	ing *Ingestor
@@ -126,6 +129,7 @@ func New(src EventSource, st Store, reg *rules.Registry, d Dispatcher, interval 
 		registry: reg,
 		interval: interval,
 		log:      log,
+		dispatch: d,
 		ing:      NewIngestor(st, reg, d, log),
 		sched:    NewScheduler(),
 	}
@@ -143,6 +147,9 @@ func (p *Poller) WithMetrics(m *metrics.Metrics) *Poller {
 // means no spans at all.
 func (p *Poller) WithTelemetry(t *telemetry.Provider) *Poller {
 	p.telemetry = t
+	return p
+}
+
 // WithReorg enables reorg detection over a window of `window` recent ledgers
 // and holds alerts until they are `depth` ledgers behind the tip. window 0
 // disables detection and depth 0 alerts immediately: both defaults reproduce
@@ -553,16 +560,4 @@ func (p *Poller) fireAlert(ctx context.Context, m store.Monitor, rule store.Rule
 		Payload:   alert.Payload,
 		CreatedAt: alert.CreatedAt,
 	})
-}
-
-// ruleCooldown reads a rule's optional cooldown. It is validated when the rule
-// is created, so a value that no longer parses is treated as "no cooldown"
-// rather than dropping matches.
-func ruleCooldown(rule store.Rule) time.Duration {
-	d, err := rules.ParseCooldown(rule.Params)
-	if err != nil {
-		return 0
-	}
-	return d
-	p.matched += p.ing.Handle(ctx, decoded, monitors, HandleOptions{Deliver: true}).Matched
 }
