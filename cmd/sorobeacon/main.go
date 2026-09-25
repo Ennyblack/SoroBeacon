@@ -1,10 +1,12 @@
 // Command sorobeacon runs the SoroBeacon monitoring service: the event
-// poller, the JSON API and the dashboard, all in one process.
+// poller, the JSON API and the dashboard, all in one process. Given any
+// argument it acts as a CLI for a running instance instead — see cli.go.
 package main
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -16,6 +18,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/sorotrail/sorobeacon/internal/api"
+	"github.com/sorotrail/sorobeacon/internal/archive"
 	"github.com/sorotrail/sorobeacon/internal/auth"
 	"github.com/sorotrail/sorobeacon/internal/broadcast"
 	"github.com/sorotrail/sorobeacon/internal/config"
@@ -30,7 +33,21 @@ import (
 	"github.com/sorotrail/sorobeacon/internal/web"
 )
 
+// main dispatches on the arguments. With none, the binary is the monitoring
+// service — how the container image and every existing deployment invoke it.
+// With any, it is a client for a running instance, so bootstrapping and
+// scripted changes stop needing a curl script. An unrecognised command is an
+// error rather than a silent server start, because a typo'd subcommand is
+// otherwise impossible to notice.
 func main() {
+	args := os.Args[1:]
+	if len(args) > 0 {
+		if err := runCLI(context.Background(), args, os.Stdout); err != nil {
+			reportCLIError(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		slog.Error("fatal", "err", err)
 		os.Exit(1)
@@ -71,22 +88,33 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Storage.
+	// Storage. The DATABASE_URL scheme selects the backend: postgres /
+	// postgresql for the pgx pool, sqlite for a single-file database that
+	// removes the Postgres prerequisite on a small VPS or Raspberry Pi. Both
+	// implement store.Store and apply their own embedded migrations.
 	if err := store.Migrate(cfg.DatabaseURL); err != nil {
 		return err
 	}
-	st, err := store.NewPostgres(ctx, cfg.DatabaseURL, store.PoolSettings{
+	st, err := store.New(ctx, cfg.DatabaseURL, store.PoolSettings{
 		MaxConns:        cfg.DatabaseMaxConns,
 		MinConns:        cfg.DatabaseMinConns,
 		MaxConnLifetime: cfg.DatabaseMaxConnLifetime,
 		MaxConnIdleTime: cfg.DatabaseMaxConnIdleTime,
-	})
+	}, configCipher)
 	if err != nil {
 		return err
 	}
-	st.WithConfigCipher(configCipher)
 	defer st.Close()
-	log.Info("database ready")
+	log.Info("database ready", "backend", store.BackendName(cfg.DatabaseURL))
+
+	// Postgres partitions alerts by month. Make sure the months just ahead
+	// exist before the poller can write into them, so a row never has to fall
+	// back to the default partition under normal operation. A no-op on SQLite.
+	if pe, ok := st.(store.PartitionEnsurer); ok {
+		if err := pe.EnsureAlertPartitions(ctx, time.Now().UTC(), 3); err != nil {
+			return err
+		}
+	}
 
 	// Pipeline: event source -> rules -> alerts -> channels. The source is
 	// the single seam between the poller and wherever events come from.
@@ -99,20 +127,28 @@ func run() error {
 		health = stc
 		log.Info("upstream mode: reading events from SoroTrail", "url", cfg.SoroTrailURL)
 	default: // "rpc"
-		rpc := stellar.NewHTTPClient(cfg.RPCURL, nil)
+		// Several endpoints behind one Client: calls try them in the order
+		// RPC_URLS lists them and fail over when one rate-limits or goes
+		// down. The poller, the spec source and the readiness probe all
+		// keep talking to a single stellar.Client, so nothing downstream
+		// knows the difference.
+		rpc := stellar.NewFailoverClient(cfg.RPCURLs, nil, log)
 
-		// Verify the RPC endpoint really is the configured network before
-		// any monitor starts evaluating events. A mainnet endpoint behind
-		// a testnet config (or the reverse) silently evaluates every rule
-		// against the wrong chain — this fails fast instead. There is no
-		// equivalent check in upstream mode: the indexer's own deployment
-		// owns its network.
-		if net, err := rpc.GetNetwork(ctx); err != nil {
-			log.Warn("could not verify network passphrase", "error", err)
-		} else if err := config.VerifyPassphrase(cfg.Network.Passphrase, net.Passphrase); err != nil {
+		// Verify every RPC endpoint really is the configured network before
+		// any monitor starts evaluating events. A mainnet endpoint behind a
+		// testnet config (or the reverse) silently evaluates every rule
+		// against the wrong chain, and because failover picks a node per
+		// call, one mixed endpoint would corrupt the alert stream
+		// intermittently — the hardest kind of bug to notice. This fails
+		// fast instead. There is no equivalent check in upstream mode: the
+		// indexer's own deployment owns its network.
+		if err := verifyNetworkEndpoints(ctx, log, rpc, cfg.Network.Passphrase); err != nil {
 			return err
 		}
-		log.Info("network verified", "network", cfg.Network.Name, "rpc_url", cfg.RPCURL)
+		log.Info("network verified",
+			"network", cfg.Network.Name,
+			"rpc_url", cfg.RPCURL,
+			"rpc_endpoint_count", len(cfg.RPCURLs))
 
 		// Contract specs are fetched lazily per contract and cached, so
 		// events from a contract with a spec arrive with named fields while
@@ -150,6 +186,9 @@ func run() error {
 	p := poller.New(src, st, registry, dispatcher, cfg.PollInterval, log).
 		WithMetrics(m).
 		WithPublisher(liveAlerts)
+	p := poller.New(src, st, registry, dispatcher, cfg.PollInterval, log).
+		WithMetrics(m).
+		WithReorg(cfg.ReorgTrackingWindow, cfg.ReorgConfirmationDepth)
 
 	// HTTP: JSON API under /api/v1, dashboard at /.
 	apiSrv := api.New(st, registry, factory, health, log).
@@ -201,8 +240,30 @@ func run() error {
 		}
 	}()
 	go p.Run(ctx)
+	// Retention can tier expired alerts to object storage before deleting
+	// them. Off by default: an empty ARCHIVE_URL leaves the pruner behaving
+	// exactly as it did before archiving existed.
+	var archiver store.AlertArchiver
+	if cfg.ArchiveURL != "" {
+		back, err := archive.FromURL(cfg.ArchiveURL)
+		if err != nil {
+			return err
+		}
+		pruner, err := archive.NewPruner(back)
+		if err != nil {
+			return err
+		}
+		archiver = pruner
+		// Never log the URL: an operator may embed an endpoint or token in a
+		// query string. The scheme is enough to confirm what was selected.
+		log.Info("alert archiving enabled")
+	}
 	if cfg.AlertRetention > 0 {
-		go store.RunAlertPruner(ctx, st, cfg.AlertRetention, store.DefaultPruneInterval, store.DefaultPruneBatch, log)
+		go store.RunAlertPruner(ctx, st, cfg.AlertRetention, store.DefaultPruneInterval, store.DefaultPruneBatch, archiver, log)
+	} else if archiver != nil {
+		// Archiving only happens before a delete, so it is inert without
+		// retention. Warn rather than silently doing nothing.
+		log.Warn("ARCHIVE_URL is set but ALERT_RETENTION is unset; nothing will be archived or deleted")
 	}
 
 	select {
@@ -239,6 +300,38 @@ func warnIfAPITokenUnset(log *slog.Logger, tokens []string) {
 	if len(tokens) == 0 {
 		log.Warn("API authentication is disabled; set API_TOKEN to require a bearer token on /api/v1 and a sign-in on the dashboard")
 	}
+}
+
+// startupNetworkTimeout bounds the startup passphrase sweep across every
+// configured endpoint, so a set of unreachable endpoints delays boot by at
+// most this long rather than once per endpoint's own HTTP timeout.
+const startupNetworkTimeout = 15 * time.Second
+
+// verifyNetworkEndpoints asks every configured RPC endpoint which network it
+// belongs to and refuses to start if any of them reports a passphrase other
+// than the configured one. Failover spreads requests over the whole list, so
+// a list that spans two networks would emit a mixture of events from both
+// chains — this is the check that stops it.
+//
+// An endpoint that cannot be reached is logged and skipped rather than fatal:
+// unreachability is precisely what failover exists for, and an endpoint that
+// is down at boot may well be the healthy one a minute later. Only a wrong
+// answer is fatal.
+func verifyNetworkEndpoints(ctx context.Context, log *slog.Logger, client *stellar.FailoverClient, configured string) error {
+	ctx, cancel := context.WithTimeout(ctx, startupNetworkTimeout)
+	defer cancel()
+
+	for _, ep := range client.Endpoints() {
+		net, err := ep.Client.GetNetwork(ctx)
+		if err != nil {
+			log.Warn("could not verify network passphrase", "rpc_url", ep.URL, "error", err)
+			continue
+		}
+		if err := config.VerifyPassphrase(configured, net.Passphrase); err != nil {
+			return fmt.Errorf("rpc endpoint %s: %w", ep.URL, err)
+		}
+	}
+	return nil
 }
 
 // startupHealthTimeout bounds the one-off health check logged at startup,
