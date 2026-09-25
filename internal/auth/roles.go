@@ -46,13 +46,15 @@ const WebRouteRole Role = RoleViewer
 // RoleEnforcer handles role authorization checks.
 type RoleEnforcer struct {
 	a        *Authenticator
+	auth     *Authenticator
 	routes   []RouteRoleConfig
 }
 
 // NewRoleEnforcer creates a RoleEnforcer.
 func NewRoleEnforcer(a *Authenticator) *RoleEnforcer {
 	return &RoleEnforcer{
-		a: a,
+		a:    a,
+		auth: a,
 		routes: []RouteRoleConfig{
 			// Probes and public
 			{Method: "GET", Path: "/api/v1/livez", Role: RoleViewer},
@@ -104,7 +106,7 @@ func RoleMiddleware(re *RoleEnforcer, defaultRole Role) func(http.Handler) http.
 				_, _ = w.Write([]byte(`{"error":"forbidden","code":"Forbidden"}`))
 				return
 			}
-			role, ok := re.a.RoleForRequest(r)
+			role, ok := re.auth.RoleForRequest(r)
 			if !ok {
 				role = RoleUnknown
 			}
