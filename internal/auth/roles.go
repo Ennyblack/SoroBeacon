@@ -104,7 +104,7 @@ func RoleMiddleware(re *RoleEnforcer, defaultRole Role) func(http.Handler) http.
 				_, _ = w.Write([]byte(`{"error":"forbidden","code":"Forbidden"}`))
 				return
 			}
-			role, ok := re.auth.RoleForRequest(r)
+			role, ok := re.a.RoleForRequest(r)
 			if !ok {
 				role = RoleUnknown
 			}
