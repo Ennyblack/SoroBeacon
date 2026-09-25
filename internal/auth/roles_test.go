@@ -12,19 +12,22 @@ func TestParseRole(t *testing.T) {
 	tests := []struct {
 		input    string
 		expected Role
+		ok       bool
 	}{
-		{"viewer", RoleViewer},
-		{"VIEWER", RoleViewer},
-		{"  viewer  ", RoleViewer},
-		{"editor", RoleEditor},
-		{"ADMIN", RoleAdmin},
-		{"unknown", RoleUnknown},
-		{"", RoleUnknown},
+		{"viewer", RoleViewer, true},
+		{"VIEWER", RoleViewer, true},
+		{"  viewer  ", RoleViewer, true},
+		{"editor", RoleEditor, true},
+		{"ADMIN", RoleAdmin, true},
+		{"unknown", RoleUnknown, false},
+		{"", RoleUnknown, false},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.input, func(t *testing.T) {
-			assert.Equal(t, tc.expected, ParseRole(tc.input))
+			r, ok := ParseRole(tc.input)
+			assert.Equal(t, tc.expected, r)
+			assert.Equal(t, tc.ok, ok)
 		})
 	}
 }
