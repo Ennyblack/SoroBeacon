@@ -55,7 +55,9 @@ type Server struct {
 	// auth verifies bearer tokens and dashboard sessions. Nil (the New
 	// default until WithAuth is called, or when no API_TOKEN is set) means
 	// every request is allowed.
-	auth *auth.Authenticator
+	a     *auth.Authenticator
+	auth  *auth.Authenticator
+	roles *auth.RoleEnforcer
 }
 
 // New wires an API server. Rate limiting stays off until WithRateLimit.
@@ -100,7 +102,14 @@ func (s *Server) WithRateLimit(cfg RateLimitConfig) *Server {
 // existed. main builds one authenticator and shares it with the dashboard,
 // so a session minted at /login also satisfies this middleware.
 func (s *Server) WithAuth(a *auth.Authenticator) *Server {
+	s.a = a
 	s.auth = a
+	return s
+}
+
+// WithRoles attaches role enforcement to the API router.
+func (s *Server) WithRoles(re *auth.RoleEnforcer) *Server {
+	s.roles = re
 	return s
 }
 
@@ -114,6 +123,7 @@ func (s *Server) Routes() chi.Router {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer, MaxBodyMiddleware(s.maxBodyBytes))
 	r.Use(AuthMiddleware(s.auth))
+	r.Use(auth.RoleMiddleware(s.roles, auth.APIRouteRole))
 	r.Use(RateLimitMiddleware(s.rateLimit))
 	// JSON clients hitting a typo'd path or the wrong method should get
 	// the same envelope as every other API error, not chi's plain-text
