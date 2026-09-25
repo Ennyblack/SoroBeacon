@@ -25,27 +25,27 @@ func TestParseRole(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.input, func(t *testing.T) {
-			r, ok := ParseRole(tc.input)
-			assert.Equal(t, tc.expected, r)
+			role, ok := ParseRole(tc.input)
+			assert.Equal(t, tc.expected, role)
 			assert.Equal(t, tc.ok, ok)
 		})
 	}
 }
 
 func TestRoleHierarchy(t *testing.T) {
-	assert.True(t, RoleViewer.AtLeast(RoleViewer))
-	assert.False(t, RoleViewer.AtLeast(RoleEditor))
-	assert.False(t, RoleViewer.AtLeast(RoleAdmin))
+	assert.True(t, RoleViewer.HasPermission(RoleViewer))
+	assert.False(t, RoleViewer.HasPermission(RoleEditor))
+	assert.False(t, RoleViewer.HasPermission(RoleAdmin))
 
-	assert.True(t, RoleEditor.AtLeast(RoleViewer))
-	assert.True(t, RoleEditor.AtLeast(RoleEditor))
-	assert.False(t, RoleEditor.AtLeast(RoleAdmin))
+	assert.True(t, RoleEditor.HasPermission(RoleViewer))
+	assert.True(t, RoleEditor.HasPermission(RoleEditor))
+	assert.False(t, RoleEditor.HasPermission(RoleAdmin))
 
-	assert.True(t, RoleAdmin.AtLeast(RoleViewer))
-	assert.True(t, RoleAdmin.AtLeast(RoleEditor))
-	assert.True(t, RoleAdmin.AtLeast(RoleAdmin))
+	assert.True(t, RoleAdmin.HasPermission(RoleViewer))
+	assert.True(t, RoleAdmin.HasPermission(RoleEditor))
+	assert.True(t, RoleAdmin.HasPermission(RoleAdmin))
 
-	assert.False(t, RoleUnknown.AtLeast(RoleViewer))
+	assert.False(t, RoleUnknown.HasPermission(RoleViewer))
 }
 
 func TestRoleMiddlewareFailClosedAndUnassigned(t *testing.T) {
