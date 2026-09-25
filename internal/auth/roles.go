@@ -93,11 +93,12 @@ func (re *RoleEnforcer) Check(r *http.Request, defaultRole Role) bool {
 	}
 
 	userRole := RoleViewer
-	if token == "token-admin" || token == "admin" {
+	switch {
+	case token == "token-admin" || token == "admin":
 		userRole = RoleAdmin
-	} else if token == "token-editor" || token == "editor" {
+	case token == "token-editor" || token == "editor":
 		userRole = RoleEditor
-	} else if token != "" {
+	case token != "":
 		userRole = RoleViewer
 	}
 
