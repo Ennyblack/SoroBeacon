@@ -60,7 +60,7 @@ type Authenticator struct {
 	// mismatch, which would otherwise leak each configured token's length.
 	tokens []tokenEntry
 
-	ttl      time.Duration
+	tt       time.Duration
 	mu       sync.Mutex
 	sessions map[string]sessionInfo
 	now      func() time.Time
@@ -75,8 +75,8 @@ func New(tokens []string, ttl time.Duration) *Authenticator {
 		ttl = DefaultSessionTTL
 	}
 	a := &Authenticator{
-		ttl:      ttl,
-		sessions: make(map[string]sessionInfo),
+	tt:       ttl,
+	sessions: make(map[string]sessionInfo),
 		now:      time.Now,
 	}
 	for _, t := range tokens {
@@ -104,11 +104,13 @@ func New(tokens []string, ttl time.Duration) *Authenticator {
 // reads it so the cookie it sets and the server-side session expire
 // together instead of drifting apart.
 func (a *Authenticator) SessionTTL() time.Duration {
-	if a == nil || a.ttl <= 0 {
+	if a == nil || a.tt <= 0 {
 		return DefaultSessionTTL
 	}
-	return a.ttl
+	return a.tt
 }
+
+
 
 // Enabled reports whether a token is configured. When it is not, both the
 // API and the dashboard stay open: the middlewares step aside entirely and
@@ -188,7 +190,7 @@ func (a *Authenticator) NewSessionWithRole(role Role) string {
 	defer a.mu.Unlock()
 	a.sweepLocked(a.now())
 	a.sessions[id] = sessionInfo{
-		expires: a.now().Add(a.ttl),
+		expires: a.now().Add(a.tt),
 		role:    role,
 	}
 	return id
@@ -268,18 +270,17 @@ func (a *Authenticator) Authenticated(r *http.Request) bool {
 }
 
 // RoleForRequest determines the effective Role for an HTTP request.
-func (a *Authenticator) RoleForRequest(r *http.Request) Role {
+func (a *Authenticator) RoleForRequest(r *http.Request) (Role, bool) {
 	if !a.Enabled() {
-		return RoleAdmin
+		return RoleAdmin, true
 	}
 	if token, ok := Bearer(r.Header.Get("Authorization")); ok {
-		if role, ok := a.verifyToken(token);
-		ok {
-			return role
+		if role, ok := a.verifyToken(token); ok {
+			return role, true
 		}
 	}
 	if role, ok := a.getSessionRole(SessionID(r)); ok {
-		return role
+		return role, true
 	}
-	return ""
+	return RoleUnknown, false
 }
