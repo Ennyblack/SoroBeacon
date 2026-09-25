@@ -367,6 +367,9 @@ type Channels interface {
 	ListChannelsPage(ctx context.Context, f ListFilter) ([]Channel, error)
 	UpdateChannel(ctx context.Context, c *Channel) error
 	DeleteChannel(ctx context.Context, id int64) error
+	// ListMonitorsForChannel returns monitors attached to a channel, including
+	// every attachment so callers can identify monitors left without a channel.
+	ListMonitorsForChannel(ctx context.Context, channelID int64) ([]Monitor, error)
 	// ListChannelsForMonitor returns the enabled channels a monitor alerts to.
 	ListChannelsForMonitor(ctx context.Context, monitorID int64) ([]Channel, error)
 }
