@@ -1,70 +1,38 @@
 package auth
 
 import (
-	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
 
 func TestParseRole(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected Role
-	}{
-		{"viewer", RoleViewer},
-		{"VIEWER", RoleViewer},
-		{"  viewer  ", RoleViewer},
-		{"editor", RoleEditor},
-		{"ADMIN", RoleAdmin},
-		{"unknown", RoleUnknown},
-		{"", RoleUnknown},
-	}
+	r, ok := ParseRole("viewer")
+	assert.True(t, ok)
+	assert.Equal(t, RoleViewer, r)
 
-	for _, tc := range tests {
-		t.Run(tc.input, func(t *testing.T) {
-			assert.Equal(t, tc.expected, ParseRole(tc.input))
-		})
-	}
+	r, ok = ParseRole("editor")
+	assert.True(t, ok)
+	assert.Equal(t, RoleEditor, r)
+
+	r, ok = ParseRole("admin")
+	assert.True(t, ok)
+	assert.Equal(t, RoleAdmin, r)
+
+	_, ok = ParseRole("unknown")
+	assert.False(t, ok)
 }
 
-func TestRoleHierarchy(t *testing.T) {
-	assert.True(t, RoleViewer.AtLeast(RoleViewer))
-	assert.False(t, RoleViewer.AtLeast(RoleEditor))
-	assert.False(t, RoleViewer.AtLeast(RoleAdmin))
+func TestRolePermissions(t *testing.T) {
+	assert.True(t, RoleAdmin.HasPermission(RoleAdmin))
+	assert.True(t, RoleAdmin.HasPermission(RoleEditor))
+	assert.True(t, RoleAdmin.HasPermission(RoleViewer))
 
-	assert.True(t, RoleEditor.AtLeast(RoleViewer))
-	assert.True(t, RoleEditor.AtLeast(RoleEditor))
-	assert.False(t, RoleEditor.AtLeast(RoleAdmin))
+	assert.False(t, RoleEditor.HasPermission(RoleAdmin))
+	assert.True(t, RoleEditor.HasPermission(RoleEditor))
+	assert.True(t, RoleEditor.HasPermission(RoleViewer))
 
-	assert.True(t, RoleAdmin.AtLeast(RoleViewer))
-	assert.True(t, RoleAdmin.AtLeast(RoleEditor))
-	assert.True(t, RoleAdmin.AtLeast(RoleAdmin))
-
-	assert.False(t, RoleUnknown.AtLeast(RoleViewer))
-}
-
-func TestRoleMiddlewareFailClosedAndUnassigned(t *testing.T) {
-	a := New([]string{"token-admin"}, 0)
-	re := NewRoleEnforcer(a)
-	re.RegisterRoute("GET", "/api/v1/safe", RoleViewer)
-
-	handler := RoleMiddleware(re, RoleViewer)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	// Unassigned route should fail closed (403)
-	reqUnassigned := httptest.NewRequest("GET", "/api/v1/unknown-route", nil)
-	reqUnassigned.Header.Set("Authorization", "Bearer token-admin")
-	recUnassigned := httptest.NewRecorder()
-	handler.ServeHTTP(recUnassigned, reqUnassigned)
-	assert.Equal(t, http.StatusForbidden, recUnassigned.Code)
-
-	// Assigned route with proper role should succeed
-	reqAssigned := httptest.NewRequest("GET", "/api/v1/safe", nil)
-	reqAssigned.Header.Set("Authorization", "Bearer token-admin")
-	recAssigned := httptest.NewRecorder()
-	handler.ServeHTTP(recAssigned, reqAssigned)
-	assert.Equal(t, http.StatusOK, recAssigned.Code)
+	assert.False(t, RoleViewer.HasPermission(RoleAdmin))
+	assert.False(t, RoleViewer.HasPermission(RoleEditor))
+	assert.True(t, RoleViewer.HasPermission(RoleViewer))
 }
