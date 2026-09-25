@@ -43,7 +43,6 @@ type PositionReader interface {
 const DefaultMaxBodyBytes int64 = 1 << 20
 
 type Server struct {
-	auth *auth.Authenticator
 	store              store.Store
 	registry           *rules.Registry
 	factory            *notify.Factory
@@ -56,7 +55,8 @@ type Server struct {
 	// auth verifies bearer tokens and dashboard sessions. Nil (the New
 	// default until WithAuth is called, or when no API_TOKEN is set) means
 	// every request is allowed.
-	a *auth.Authenticator
+	a    *auth.Authenticator
+	auth *auth.Authenticator
 	roles *auth.RoleEnforcer
 }
 
