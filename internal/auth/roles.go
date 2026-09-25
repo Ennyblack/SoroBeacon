@@ -8,94 +8,78 @@ import (
 type Role string
 
 const (
-	RoleUnknown Role = ""
 	RoleViewer  Role = "viewer"
 	RoleEditor  Role = "editor"
 	RoleAdmin   Role = "admin"
+	RoleUnknown Role = ""
 )
 
 func ParseRole(s string) (Role, bool) {
-	cleaned := strings.ToLower(strings.TrimSpace(s))
-	switch cleaned {
-	case "viewer":
-		return RoleViewer, true
-	case "editor":
-		return RoleEditor, true
-	case "admin":
-		return RoleAdmin, true
-	default:
-		return RoleUnknown, false
-	}
-}
-
-func (r Role) Level() int {
-	switch r {
+	s = strings.TrimSpace(strings.ToLower(s))
+	switch Role(s) {
 	case RoleViewer:
-		return 1
+		return RoleViewer, true
 	case RoleEditor:
-		return 2
+		return RoleEditor, true
 	case RoleAdmin:
-		return 3
-	default:
-		return 0
+		return RoleAdmin, true
 	}
-}
-
-func (r Role) AtLeast(other Role) bool {
-	return r.Level() >= other.Level()
+	return RoleUnknown, false
 }
 
 func (r Role) HasPermission(required Role) bool {
-	return r.AtLeast(required)
+	if r == RoleAdmin {
+		return true
+	}
+	if r == RoleEditor && (required == RoleEditor || required == RoleViewer) {
+		return true
+	}
+	if r == RoleViewer && required == RoleViewer {
+		return true
+	}
+	return false
 }
 
 type RoleEnforcer struct {
 	a      *Authenticator
-	routes map[string]Role
+	routes map[string]map[string]Role
 }
 
 func NewRoleEnforcer(a *Authenticator) *RoleEnforcer {
 	return &RoleEnforcer{
 		a:      a,
-		routes: make(map[string]Role),
+		routes: make(map[string]map[string]Role),
 	}
 }
 
-func (re *RoleEnforcer) RegisterRoute(method, pattern string, role Role) {
-	if re == nil {
-		return
+func (re *RoleEnforcer) RegisterRoute(method, path string, role Role) {
+	if re.routes[path] == nil {
+		re.routes[path] = make(map[string]Role)
 	}
-	re.routes[method+" "+pattern] = role
+	re.routes[path][strings.ToUpper(method)] = role
 }
 
 func RoleMiddleware(re *RoleEnforcer, defaultRole Role) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if re == nil || re.a == nil || !re.a.Enabled() {
+			if re == nil || !re.a.Enabled() {
 				next.ServeHTTP(w, r)
 				return
 			}
-			// Fail-closed: require explicit role assignment or check permissions
-			role, ok := re.routes[r.Method+" "+r.URL.Path]
-			if !ok {
-				// If not explicitly registered, default to failing closed or defaultRole
-				role = RoleUnknown
+			required := defaultRole
+			if re.routes != nil {
+				if m, ok := re.routes[r.URL.Path]; ok {
+					if role, ok := m[r.Method]; ok {
+						required = role
+					}
+				}
 			}
-			userRole := re.a.RoleForRequest(r)
-			if !userRole.HasPermission(role) {
-				w.WriteHeader(http.StatusForbidden)
-				_, _ = w.Write([]byte(`{"error":"forbidden"}`))
+			role := re.a.RoleForRequest(r)
+			if !role.HasPermission(required) {
+				http.Error(w, "forbidden", http.StatusForbidden)
 				return
 			}
 			next.ServeHTTP(w, r)
 		})
 	}
-}
-
-func APIRouteRole(r *http.Request) Role {
-	return RoleViewer
-}
-
-func WebRouteRole(r *http.Request) Role {
-	return RoleViewer
 }
