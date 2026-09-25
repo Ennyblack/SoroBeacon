@@ -117,6 +117,10 @@ type Config struct {
 	// MonitorSilentAfter is how long since last_matched_at before the
 	// dashboard marks a monitor silent. Default 24h.
 	MonitorSilentAfter time.Duration
+	// GRPCAddr is the listen address for the optional gRPC server
+	// (GRPC_ADDR). Empty (the default) disables gRPC entirely so existing
+	// deployments do not open a new port without opting in.
+	GRPCAddr string
 	// ReorgTrackingWindow is how many recent ledgers' hashes the poller keeps
 	// and re-checks each cycle for reorg detection
 	// (REORG_TRACKING_WINDOW, default 128). Zero disables detection, which is
@@ -311,6 +315,13 @@ func Load() (Config, error) {
 		return cfg, err
 	}
 	cfg.ConfigEncryptionKey = key
+	cfg.GRPCAddr = os.Getenv("GRPC_ADDR")
+	if cfg.GRPCAddr != "" {
+		if err := validateHTTPAddr(cfg.GRPCAddr); err != nil {
+			return cfg, fmt.Errorf("invalid GRPC_ADDR: %w", err)
+		}
+	}
+
 	if v := os.Getenv("ALERT_RETENTION"); v != "" {
 		d, err := ParseRetention(v)
 		if err != nil {

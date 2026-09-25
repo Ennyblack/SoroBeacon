@@ -699,9 +699,9 @@ func (p *Postgres) CreateAlert(ctx context.Context, a *Alert) (AlertOutcome, err
 	}
 
 	err = tx.QueryRow(ctx,
-		`INSERT INTO alerts (monitor_id, rule_id, event_id, payload, ledger) VALUES ($1, $2, $3, $4, $5)
+		`INSERT INTO alerts (monitor_id, rule_id, event_id, payload, backfilled, ledger) VALUES ($1, $2, $3, $4, $5, $6)
 		 RETURNING id, created_at`,
-		a.MonitorID, a.RuleID, a.EventID, jsonOrEmpty(a.Payload), int64(a.Ledger),
+		a.MonitorID, a.RuleID, a.EventID, jsonOrEmpty(a.Payload), a.Backfilled, int64(a.Ledger),
 	).Scan(&a.ID, &a.CreatedAt)
 	if err != nil {
 		return "", err
@@ -744,9 +744,9 @@ func (p *Postgres) GetAlert(ctx context.Context, id int64) (*Alert, error) {
 	var a Alert
 	var ledger int64
 	err := p.pool.QueryRow(ctx,
-		`SELECT id, monitor_id, rule_id, event_id, payload, created_at, ledger, retracted_at
+		`SELECT id, monitor_id, rule_id, event_id, payload, created_at, ledger, retracted_at, backfilled
 		   FROM alerts WHERE id = $1`, id,
-	).Scan(&a.ID, &a.MonitorID, &a.RuleID, &a.EventID, &a.Payload, &a.CreatedAt, &ledger, &a.RetractedAt)
+	).Scan(&a.ID, &a.MonitorID, &a.RuleID, &a.EventID, &a.Payload, &a.CreatedAt, &ledger, &a.RetractedAt, &a.Backfilled)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -764,7 +764,7 @@ func alertSort(s string) string {
 }
 
 func (p *Postgres) ListAlerts(ctx context.Context, f AlertFilter) ([]Alert, error) {
-	q := `SELECT id, monitor_id, rule_id, event_id, payload, created_at, ledger, retracted_at
+	q := `SELECT id, monitor_id, rule_id, event_id, payload, created_at, ledger, retracted_at, backfilled
 		 FROM alerts WHERE TRUE`
 	args := []any{}
 	n := 0
@@ -820,7 +820,7 @@ func (p *Postgres) ListAlerts(ctx context.Context, f AlertFilter) ([]Alert, erro
 func scanAlert(row pgx.CollectableRow) (Alert, error) {
 	var a Alert
 	var ledger int64
-	err := row.Scan(&a.ID, &a.MonitorID, &a.RuleID, &a.EventID, &a.Payload, &a.CreatedAt, &ledger, &a.RetractedAt)
+	err := row.Scan(&a.ID, &a.MonitorID, &a.RuleID, &a.EventID, &a.Payload, &a.CreatedAt, &ledger, &a.RetractedAt, &a.Backfilled)
 	a.Ledger = uint32(ledger)
 	return a, err
 }
@@ -833,7 +833,7 @@ func (p *Postgres) ExpiredAlerts(ctx context.Context, cutoff time.Time, limit in
 		limit = DefaultPruneBatch
 	}
 	rows, err := p.pool.Query(ctx,
-		`SELECT id, monitor_id, rule_id, event_id, payload, created_at, ledger, retracted_at
+		`SELECT id, monitor_id, rule_id, event_id, payload, created_at, ledger, retracted_at, backfilled
 		   FROM alerts WHERE created_at < $1 ORDER BY created_at ASC, id ASC LIMIT $2`,
 		cutoff, limit)
 	if err != nil {
@@ -951,6 +951,45 @@ func (p *Postgres) SetIngestState(ctx context.Context, s IngestState) error {
 		`UPDATE ingest_state SET last_ledger = $1, last_cursor = $2, updated_at = now() WHERE id = 1`,
 		int64(s.LastLedger), s.LastCursor)
 	return err
+}
+
+// --- backfills ---
+
+func (p *Postgres) GetBackfill(ctx context.Context, monitorID int64) (Backfill, error) {
+	var b Backfill
+	var fromLedger, toLedger, nextLedger int64
+	err := p.pool.QueryRow(ctx,
+		`SELECT monitor_id, from_ledger, to_ledger, next_ledger, cursor, deliver, complete, updated_at
+		   FROM backfills WHERE monitor_id = $1`, monitorID,
+	).Scan(&b.MonitorID, &fromLedger, &toLedger, &nextLedger, &b.Cursor, &b.Deliver, &b.Complete, &b.UpdatedAt)
+	if err != nil {
+		return b, mapErr(err)
+	}
+	b.FromLedger = uint32(fromLedger)
+	b.ToLedger = uint32(toLedger)
+	b.NextLedger = uint32(nextLedger)
+	return b, nil
+}
+
+// UpsertBackfill writes the run's resume point, replacing any previous row for
+// the monitor. One row per monitor is what makes "resume where it stopped"
+// unambiguous.
+func (p *Postgres) UpsertBackfill(ctx context.Context, b *Backfill) error {
+	return p.pool.QueryRow(ctx,
+		`INSERT INTO backfills (monitor_id, from_ledger, to_ledger, next_ledger, cursor, deliver, complete)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)
+		 ON CONFLICT (monitor_id) DO UPDATE SET
+		     from_ledger = EXCLUDED.from_ledger,
+		     to_ledger   = EXCLUDED.to_ledger,
+		     next_ledger = EXCLUDED.next_ledger,
+		     cursor      = EXCLUDED.cursor,
+		     deliver     = EXCLUDED.deliver,
+		     complete    = EXCLUDED.complete,
+		     updated_at  = now()
+		 RETURNING updated_at`,
+		b.MonitorID, int64(b.FromLedger), int64(b.ToLedger), int64(b.NextLedger),
+		b.Cursor, b.Deliver, b.Complete,
+	).Scan(&b.UpdatedAt)
 }
 
 // --- stats ---

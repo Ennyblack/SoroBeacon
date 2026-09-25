@@ -70,6 +70,7 @@ func DefaultFactory() *Factory {
 	f.Register(TypeWebhook, NewWebhook)
 	f.Register(TypeMatrix, NewMatrix)
 	f.Register(TypePagerDuty, NewPagerDuty)
+	f.Register(TypeFederation, NewFederation)
 	f.Register(TypeTwilio, NewTwilio)
 	return f
 }
