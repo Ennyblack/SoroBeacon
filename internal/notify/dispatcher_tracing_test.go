@@ -87,7 +87,7 @@ func TestDeliverSpanCarriesChannelIDNotConfig(t *testing.T) {
 	require.Len(t, spans, 1)
 	attrs := map[string]string{}
 	for _, kv := range spans[0].Attributes() {
-		attrs[string(kv.Key)] = kv.Value.Emit()
+		attrs[string(kv.Key)] = kv.Value.String()
 	}
 	assert.Equal(t, "11", attrs[telemetry.AttrAlertID])
 	assert.Equal(t, "3", attrs[telemetry.AttrChannelID])
@@ -112,7 +112,7 @@ func TestDeliverSpanRecordsRequestID(t *testing.T) {
 	var rid string
 	for _, kv := range spans[0].Attributes() {
 		if string(kv.Key) == telemetry.AttrRequestID {
-			rid = kv.Value.Emit()
+			rid = kv.Value.String()
 		}
 	}
 	assert.Equal(t, "req-77", rid, "delivery spans must carry the request id so logs join traces")
@@ -160,7 +160,7 @@ func TestRetrySpanUsesRequestContext(t *testing.T) {
 	var rid string
 	for _, kv := range spans[0].Attributes() {
 		if string(kv.Key) == telemetry.AttrRequestID {
-			rid = kv.Value.Emit()
+			rid = kv.Value.String()
 		}
 	}
 	assert.Equal(t, "req-retry", rid)

@@ -133,7 +133,7 @@ func TestSetAttrsSkipsUnsupported(t *testing.T) {
 	require.Len(t, spans, 1)
 	attrs := map[string]string{}
 	for _, kv := range spans[0].Attributes() {
-		attrs[string(kv.Key)] = kv.Value.Emit()
+		attrs[string(kv.Key)] = kv.Value.String()
 	}
 	assert.Equal(t, "7", attrs[AttrAlertID])
 	assert.Equal(t, "3", attrs["count"])
@@ -189,7 +189,7 @@ func TestTraceIDHelperIsHex32(t *testing.T) {
 func attributeValue(attrs []attribute.KeyValue, key string) (string, bool) {
 	for _, kv := range attrs {
 		if string(kv.Key) == key {
-			return kv.Value.Emit(), true
+			return kv.Value.String(), true
 		}
 	}
 	return "", false

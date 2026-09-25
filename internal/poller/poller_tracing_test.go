@@ -162,7 +162,7 @@ func TestPollSpanRecordsScannedAndMatched(t *testing.T) {
 		}
 		attrs := map[string]string{}
 		for _, kv := range s.Attributes() {
-			attrs[string(kv.Key)] = kv.Value.Emit()
+			attrs[string(kv.Key)] = kv.Value.String()
 		}
 		assert.Equal(t, "2", attrs[telemetry.AttrEventsScanned])
 		assert.Equal(t, "2", attrs[telemetry.AttrEventsMatched])

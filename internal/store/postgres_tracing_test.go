@@ -68,7 +68,7 @@ func alertSpanAttrs(t *testing.T, exp *tracetest.SpanRecorder) map[string]string
 		}
 		attrs := map[string]string{}
 		for _, kv := range s.Attributes() {
-			attrs[string(kv.Key)] = kv.Value.Emit()
+			attrs[string(kv.Key)] = kv.Value.String()
 		}
 		found = attrs
 	}
