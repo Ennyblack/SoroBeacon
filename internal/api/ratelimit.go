@@ -105,16 +105,7 @@ func clientKey(r *http.Request, trustForwarded bool) string {
 	return host
 }
 
-func isProbePath(path string) bool {
-	switch {
-	case strings.HasSuffix(path, "/health"),
-		strings.HasSuffix(path, "/livez"),
-		strings.HasSuffix(path, "/readyz"):
-		return true
-	default:
-		return false
-	}
-}
+
 
 func retryAfterSeconds(rps float64) int {
 	if rps <= 0 {
