@@ -292,12 +292,13 @@ curl -s -X DELETE localhost:8080/api/v1/monitors/1/rules/2
 
 ### Channels
 
-Seven channel types ship with the MVP. `config` is validated on create/update
+Eight channel types ship with the MVP. `config` is validated on create/update
 and never returned in responses. Each has a page under
 [docs/channels/](docs/channels/):
 [Discord](docs/channels/discord.md), [Slack](docs/channels/slack.md),
 [Telegram](docs/channels/telegram.md), [Matrix](docs/channels/matrix.md),
-[PagerDuty](docs/channels/pagerduty.md), [Email](docs/channels/email.md) and
+[PagerDuty](docs/channels/pagerduty.md), [Email](docs/channels/email.md),
+[JSON template](docs/channels/jsontemplate.md) and
 the [generic webhook](docs/channels/webhook.md).
 
 ```sh
@@ -315,6 +316,7 @@ curl -s -X POST localhost:8080/api/v1/channels -d '{
 # Matrix:   {"homeserver_url": "https://matrix.example.org", "access_token": "syt_...",
 #            "room_id": "!abcdef:example.org"}
 # PagerDuty:{"routing_key": "R0UT1NGK3Y", "severity": "warning"}
+# JSON template: {"url": "https://api.example.com/v1/incidents", "body_template": "{\"title\": \"{{.MonitorName}}\", \"ref\": \"{{.EventID}}\"}"}
 
 curl -s localhost:8080/api/v1/channels
 curl -s -X PATCH localhost:8080/api/v1/channels/1 -d '{"enabled": false}'
@@ -470,4 +472,4 @@ Decoded events use a small value vocabulary (`nil`, `bool`, `string`,
 ## License
 ### Notification Channels
 
-Supported channels include [Discord](docs/channels/discord.md), [Slack](docs/channels/slack.md), [Telegram](docs/channels/telegram.md), [Matrix](docs/channels/matrix.md), [PagerDuty](docs/channels/pagerduty.md), [Twilio SMS](docs/channels/twilio.md), [Email](docs/channels/email.md), and generic [Webhooks](docs/channels/webhook.md).
+Supported channels include [Discord](docs/channels/discord.md), [Slack](docs/channels/slack.md), [Telegram](docs/channels/telegram.md), [Matrix](docs/channels/matrix.md), [PagerDuty](docs/channels/pagerduty.md), [Twilio SMS](docs/channels/twilio.md), [Email](docs/channels/email.md), [JSON template](docs/channels/jsontemplate.md), and generic [Webhooks](docs/channels/webhook.md).

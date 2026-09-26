@@ -50,14 +50,15 @@ type Factory struct {
 
 // Channel type names understood by DefaultFactory.
 const (
-	TypeDiscord   = "discord"
-	TypeSlack     = "slack"
-	TypeTelegram  = "telegram"
-	TypeEmail     = "email"
-	TypeWebhook   = "webhook"
-	TypeMatrix    = "matrix"
-	TypePagerDuty = "pagerduty"
-	TypeTwilio    = "twilio"
+	TypeDiscord       = "discord"
+	TypeSlack         = "slack"
+	TypeTelegram      = "telegram"
+	TypeEmail         = "email"
+	TypeWebhook       = "webhook"
+	TypeMatrix        = "matrix"
+	TypePagerDuty     = "pagerduty"
+	TypeTwilio        = "twilio"
+	TypeJSONTemplate  = "jsontemplate"
 )
 
 // DefaultFactory returns a Factory with the built-in channel types.
@@ -72,6 +73,7 @@ func DefaultFactory() *Factory {
 	f.Register(TypePagerDuty, NewPagerDuty)
 	f.Register(TypeFederation, NewFederation)
 	f.Register(TypeTwilio, NewTwilio)
+	f.Register(TypeJSONTemplate, NewJSONTemplate)
 	return f
 }
 
