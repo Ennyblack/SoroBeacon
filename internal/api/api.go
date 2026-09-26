@@ -175,6 +175,12 @@ func (s *Server) Routes() chi.Router {
 		r.Post("/{id}/test", s.testChannel)
 	})
 
+	r.Route("/inhibitions", func(r chi.Router) {
+		r.Post("/", s.createInhibition)
+		r.Get("/", s.listInhibitions)
+		r.Delete("/{sourceID}/{targetID}", s.deleteInhibition)
+	})
+
 	r.Route("/templates", func(r chi.Router) {
 		r.Post("/", s.createTemplate)
 		r.Get("/", s.listTemplates)

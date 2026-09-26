@@ -191,6 +191,10 @@ type Alert struct {
 	EventID   string          `json:"event_id"`
 	Payload   json.RawMessage `json:"payload"`
 	CreatedAt time.Time       `json:"created_at"`
+	// InhibitedByRuleID is set when an inhibition rule suppressed this
+	// alert's delivery. Nil means delivered (or never subjected to
+	// inhibition); the alert row itself is always stored.
+	InhibitedByRuleID *int64 `json:"inhibited_by_rule_id,omitempty"`
 	// Severity is the alert severity copied from the rule at creation time.
 	// It is stored so changing a rule's severity later does not rewrite
 	// history.
@@ -673,6 +677,7 @@ type Store interface {
 	Rules
 	Channels
 	Alerts
+	Inhibitions
 	Ingest
 	Backfills
 	Ledgers
