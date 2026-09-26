@@ -157,6 +157,7 @@ func (s *Server) Routes() chi.Router {
 			r.Patch("/", s.updateMonitor)
 			r.Delete("/", s.deleteMonitor)
 			r.Post("/duplicate", s.duplicateMonitor)
+			r.Post("/rules/dry-run", s.dryRun)
 			r.Post("/rules", s.createRule)
 			r.Get("/rules", s.listRules)
 			r.Post("/rules/bulk", s.createRulesBulk)
@@ -194,6 +195,7 @@ func (s *Server) Routes() chi.Router {
 	// readability; chi matches the static segment either way.
 	r.Get("/alerts/stream", s.streamAlerts)
 	r.Get("/alerts.csv", s.exportAlertsCSV)
+	r.Get("/alerts/export", s.exportAlertsNDJSON)
 	r.Get("/alerts/{id}/deliveries", s.listDeliveries)
 	r.Post("/alerts/{id}/deliveries/{channelID}/retry", s.retryDelivery)
 	r.Get("/health", s.health)

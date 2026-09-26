@@ -935,6 +935,36 @@ func (s *SQLite) CreateAlert(ctx context.Context, a *Alert) (AlertOutcome, error
 	return AlertCreated, nil
 }
 
+// CreateAlertGroup creates or increments the alert group identified
+// by key and windowStart. On conflict it increments the count; on
+// first insertion it initializes count to 1. Returns the new count.
+func (s *SQLite) CreateAlertGroup(ctx context.Context, key string, windowStart time.Time) (int64, error) {
+	var count int64
+	err := s.db.QueryRowContext(ctx,
+		`INSERT INTO alert_groups (group_key, window_start, count, first_alert_id)
+		 VALUES (?, ?, 1, NULL)
+		 ON CONFLICT (group_key, window_start) DO UPDATE
+		 SET count = alert_groups.count + 1
+		 RETURNING count`,
+		key, sqliteTimeString(windowStart),
+	).Scan(&count)
+	if err != nil {
+		return 0, mapSQLiteErr(err)
+	}
+	return count, nil
+}
+
+// GroupAlerts creates or increments the alert group for key with
+// windowStart and returns whether the alert should be delivered
+// immediately (first alert in the window) and the current count.
+func (s *SQLite) GroupAlerts(ctx context.Context, key string, windowStart time.Time) (shouldDeliver bool, currentCount int64, err error) {
+	count, err := s.CreateAlertGroup(ctx, key, windowStart)
+	if err != nil {
+		return false, 0, err
+	}
+	return count == 1, count, nil
+}
+
 func (s *SQLite) GetAlert(ctx context.Context, id int64) (*Alert, error) {
 	a, err := scanSQLiteAlert(s.db.QueryRowContext(ctx,
 		`SELECT id, monitor_id, rule_id, event_id, payload, created_at, ledger, retracted_at FROM alerts WHERE id = ?`, id))

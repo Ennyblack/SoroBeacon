@@ -219,6 +219,61 @@
         }
       }
     },
+    "/monitors/{id}/rules/dry-run": {
+      "parameters": [
+        { "$ref": "#/components/parameters/ID" }
+      ],
+      "post": {
+        "summary": "Dry-run a rule against historical events",
+        "description": "Evaluates a candidate rule against stored alert history. Nothing is persisted and nothing is delivered. Stored alerts are biased toward matched events, so results underrepresent the true event corpus.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["type"],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": ["event_emitted", "value_threshold", "token_event"],
+                    "description": "Rule type to evaluate"
+                  },
+                  "params": {
+                    "type": "object",
+                    "description": "Type-specific rule parameters; validated against the rule type"
+                  },
+                  "window_days": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 90,
+                    "description": "Lookback window in days (clamped to 90)"
+                  },
+                  "max_samples": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000,
+                    "description": "Maximum historical alerts to evaluate"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Dry-run results",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/DryRunResult" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
     "/monitors/{id}/rules": {
       "parameters": [
         { "$ref": "#/components/parameters/ID" }
@@ -554,6 +609,65 @@
             "description": "Alerts as CSV",
             "content": {
               "text/csv": {
+                "schema": { "type": "string" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/alerts/export": {
+      "get": {
+        "summary": "Export alerts as NDJSON",
+        "description": "Streams every alert matching the same filters as GET /alerts as application/x-ndjson. Each line is a JSON object with id, monitor_id, monitor_name, rule_id, event_id, event_name, contract_id, ledger, created_at, and payload. A repeatable-read snapshot keeps the export consistent; cancellation stops the query. When no limit is given the export is capped at 10000 rows.",
+        "parameters": [
+          {
+            "name": "monitor_id",
+            "in": "query",
+            "schema": { "type": "integer", "format": "int64" }
+          },
+          {
+            "name": "rule_id",
+            "in": "query",
+            "schema": { "type": "integer", "format": "int64" }
+          },
+          {
+            "name": "contract_id",
+            "in": "query",
+            "schema": { "type": "string" },
+            "description": "Exact match on payload.contract_id"
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "schema": { "type": "string", "format": "date-time" },
+            "description": "RFC 3339 lower bound on alert creation"
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "schema": { "type": "string", "format": "date-time" },
+            "description": "RFC 3339 upper bound on alert creation"
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "schema": { "type": "string", "enum": ["created_at_desc", "created_at_asc"], "default": "created_at_desc" },
+            "description": "Keyset order; anything else is 400"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": { "type": "integer", "minimum": 1, "default": 10000, "maximum": 10000 },
+            "description": "Maximum rows to export; the endpoint caps at 10000"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Alerts as NDJSON stream",
+            "content": {
+              "application/x-ndjson": {
                 "schema": { "type": "string" }
               }
             }
@@ -1388,6 +1502,37 @@
           "monitor_id": { "type": "integer", "format": "int64" },
           "status": { "type": "string", "enum": ["created", "skipped", "error"] },
           "error": { "type": "string" }
+        }
+      },
+      "DryRunResult": {
+        "type": "object",
+        "required": ["count", "matches", "total_evaluated", "note"],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "description": "Number of historical events that matched the rule"
+          },
+          "matches": {
+            "type": "array",
+            "description": "Sample of matching events",
+            "items": {
+              "type": "object",
+              "properties": {
+                "event_id": { "type": "string" },
+                "contract_id": { "type": "string" },
+                "event_name": { "type": "string" },
+                "ledger": { "type": "integer", "format": "uint32" }
+              }
+            }
+          },
+          "total_evaluated": {
+            "type": "integer",
+            "description": "Total number of historical events evaluated"
+          },
+          "note": {
+            "type": "string",
+            "description": "Corpus bias and window documentation"
+          }
         }
       }
     }

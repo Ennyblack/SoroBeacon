@@ -44,6 +44,8 @@ type Store interface {
 	ListMonitors(ctx context.Context, enabledOnly bool) ([]store.Monitor, error)
 	ListRules(ctx context.Context, monitorID int64, enabledOnly bool) ([]store.Rule, error)
 	CreateAlert(ctx context.Context, a *store.Alert) (store.AlertOutcome, error)
+	GroupAlerts(ctx context.Context, key string, windowStart time.Time) (shouldDeliver bool, currentCount int64, err error)
+	CreateAlertGroup(ctx context.Context, key string, windowStart time.Time) (int64, error)
 	GetIngestState(ctx context.Context) (store.IngestState, error)
 	SetIngestState(ctx context.Context, s store.IngestState) error
 	// The ledger-hash window backing reorg detection, and the retraction
@@ -591,5 +593,10 @@ func (p *Poller) fireAlert(ctx context.Context, m store.Monitor, rule store.Rule
 		// notification reports it too.
 		Payload:   alert.Payload,
 		CreatedAt: alert.CreatedAt,
+		// GroupCount is 1 for the first alert in a window (the one
+		// we are delivering now) and 0 when grouping is disabled.
+		GroupCount: groupCount,
+		WindowStart: windowStart,
+		WindowEnd:   windowEnd,
 	})
 }

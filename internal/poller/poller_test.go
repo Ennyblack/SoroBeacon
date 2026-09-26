@@ -193,6 +193,22 @@ func (f *fakeStore) SetIngestState(_ context.Context, s store.IngestState) error
 	return nil
 }
 
+// CreateAlertGroup creates or increments the alert group for key
+// with windowStart. Returns the new count.
+func (f *fakeStore) CreateAlertGroup(_ context.Context, key string, _ time.Time) (int64, error) {
+	f.groupStates[key]++
+	return f.groupStates[key], nil
+}
+
+// GroupAlerts creates or increments the alert group for key
+// with windowStart and returns whether delivery should happen
+// (first alert in the window) and the current count.
+func (f *fakeStore) GroupAlerts(_ context.Context, key string, _ time.Time) (bool, int64, error) {
+	count := f.groupStates[key] + 1
+	f.groupStates[key] = count
+	return count == 1, count, nil
+}
+
 // fakeDispatcher records dispatched alerts.
 type fakeDispatcher struct {
 	dispatched []notify.Alert

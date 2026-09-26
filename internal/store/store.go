@@ -685,6 +685,15 @@ type Store interface {
 	// consecutive days ending today (UTC). Days with no alerts are present
 	// with count 0 so a chart has no gaps. Bucketing is done in SQL.
 	AlertCountsByDay(ctx context.Context, days int) ([]AlertDayCount, error)
+	// GroupAlerts creates or increments the alert group for key
+	// with windowStart and returns whether the alert should be
+	// delivered immediately (first alert in the window) and the
+	// current group count. Grouping is off when window duration is
+	// zero, which callers enforce before invoking this method.
+	GroupAlerts(ctx context.Context, key string, windowStart time.Time) (shouldDeliver bool, currentCount int64, err error)
+	// CreateAlertGroup creates or increments the alert group row
+	// identified by key and windowStart. Returns the new count.
+	CreateAlertGroup(ctx context.Context, key string, windowStart time.Time) (int64, error)
 	Ping(ctx context.Context) error
 	Close()
 }
