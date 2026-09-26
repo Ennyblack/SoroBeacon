@@ -9,12 +9,16 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/sorotrail/sorobeacon/internal/alerts"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/sorotrail/sorobeacon/internal/broadcast"
 	"github.com/sorotrail/sorobeacon/internal/metrics"
 	"github.com/sorotrail/sorobeacon/internal/notify"
 	"github.com/sorotrail/sorobeacon/internal/rules"
 	"github.com/sorotrail/sorobeacon/internal/stellar"
 	"github.com/sorotrail/sorobeacon/internal/store"
+	"github.com/sorotrail/sorobeacon/internal/telemetry"
 )
 
 // Position is a race-free snapshot of how far the poller has got relative
@@ -24,6 +28,7 @@ type Position struct {
 	LastProcessedLedger uint32
 	LatestChainLedger   uint32
 	LastSuccessfulPoll  time.Time
+	BackingOff          bool
 }
 
 // Ready reports whether a successful poll has completed.
@@ -63,11 +68,23 @@ type Poller struct {
 	source   EventSource
 	store    Store
 	registry *rules.Registry
-	dispatch Dispatcher
 	interval time.Duration
 	log      *slog.Logger
+	// dispatch receives every newly created alert.
+	dispatch Dispatcher
+	// ing evaluates events and records alerts; shared with the backfill job
+	// so a historical replay and live ingestion match identically.
+	ing *Ingestor
+	// live is the in-process fan-out that serves the SSE endpoint. When set,
+	// every created alert is published the moment it is persisted, so a
+	// connected dashboard sees it without a database round-trip.
+	live *broadcast.Broadcaster
 	// metrics is optional instrumentation; nil-safe, see internal/metrics.
 	metrics *metrics.Metrics
+	// telemetry is optional tracing; nil-safe like metrics. When set, every
+	// poll cycle becomes one trace: fetch, decode, rule evaluation, the
+	// alert write and each channel delivery hang off the same root span.
+	telemetry *telemetry.Provider
 	// scanned/matched accumulate per-cycle counts for metrics.
 	scanned int
 	matched int
@@ -104,6 +121,12 @@ func (p *Poller) recordPosition(processed, latest uint32, at time.Time) {
 	})
 }
 
+func (p *Poller) recordBackoff(backingOff bool) {
+	position := p.Position()
+	position.BackingOff = backingOff
+	p.pos.Store(position)
+}
+
 // New wires a Poller. src is where events come from: NewRPCSource for a
 // Stellar RPC node, or the SoroTrail source for upstream mode.
 func New(src EventSource, st Store, reg *rules.Registry, d Dispatcher, interval time.Duration, log *slog.Logger) *Poller {
@@ -111,9 +134,10 @@ func New(src EventSource, st Store, reg *rules.Registry, d Dispatcher, interval 
 		source:   src,
 		store:    st,
 		registry: reg,
-		dispatch: d,
 		interval: interval,
 		log:      log,
+		dispatch: d,
+		ing:      NewIngestor(st, reg, d, log),
 		sched:    NewScheduler(),
 	}
 }
@@ -121,6 +145,25 @@ func New(src EventSource, st Store, reg *rules.Registry, d Dispatcher, interval 
 // WithMetrics attaches Prometheus instrumentation to the poll loop.
 func (p *Poller) WithMetrics(m *metrics.Metrics) *Poller {
 	p.metrics = m
+	p.ing = p.ing.WithMetrics(m)
+	return p
+}
+
+// WithPublisher attaches the live fan-out that serves the SSE endpoint. The
+// same Broadcaster is handed to internal/api: the shared Ingestor publishes
+// into it as alerts are created and /alerts/stream reads out of it, so no
+// database round-trip is needed to see an alert appear on a connected
+// dashboard.
+func (p *Poller) WithPublisher(b *broadcast.Broadcaster) *Poller {
+	p.live = b
+	return p
+}
+
+// WithTelemetry attaches tracing to the ingest pipeline. The provider's
+// own disabled state decides whether anything is exported; a nil provider
+// means no spans at all.
+func (p *Poller) WithTelemetry(t *telemetry.Provider) *Poller {
+	p.telemetry = t
 	return p
 }
 
@@ -158,16 +201,34 @@ func (p *Poller) Run(ctx context.Context) {
 				continue
 			}
 			delay = min(delay*2, 10*p.interval)
+			p.recordBackoff(true)
 			p.log.Error("poll failed", "err", err, "retry_in", delay)
 			continue
 		}
 		delay = p.interval
+		p.recordBackoff(false)
 	}
 }
 
-// Poll runs one ingest cycle. Exported so tests (and one-shot tools) can
-// drive the poller without the timing loop.
+// Poll runs one ingest cycle as a single trace. The root span
+// (poller.poll) covers the whole cycle; fetch, rule evaluation, the alert
+// write and — via the context the alert's span rides in — every channel
+// delivery hang underneath it, so one late alert is one timeline answering
+// which stage was slow. Exported so tests (and one-shot tools) can drive
+// the poller without the timing loop.
 func (p *Poller) Poll(ctx context.Context) error {
+	if p.telemetry != nil {
+		var span trace.Span
+		ctx, span = p.telemetry.WithRequestID(ctx, "poller.poll")
+		defer func() {
+			telemetry.SetAttrs(span,
+				telemetry.AttrEventsScanned, p.scanned,
+				telemetry.AttrEventsMatched, p.matched,
+			)
+			span.End()
+		}()
+	}
+
 	monitors, err := p.store.ListMonitors(ctx, true)
 	if err != nil {
 		return err
@@ -304,10 +365,32 @@ func (p *Poller) Poll(ctx context.Context) error {
 	tierLedger := map[store.Priority]uint32{}
 	cursor := ""
 	for {
-		page, err := p.source.FetchEvents(ctx, startLedger, watch, cursor, stellar.DefaultEventsLimit)
+		// One span per page covers both halves of the fetch: the RPC call
+		// (or indexer request) and the local decode of what came back. That
+		// is the "RPC fetch" stage of the slow-alert question; decode time
+		// is inside it by design, since the source owns decoding. The span
+		// ends before handleEvent so pages stay siblings under the cycle
+		// span — otherwise page two would parent to page one.
+		fetchCtx := ctx
+		// NoopSpan keeps the error/End calls below uniform when tracing is
+		// off — a nil interface would panic on End.
+		fetchSpan := telemetry.NoopSpan()
+		if p.telemetry != nil {
+			fetchCtx, fetchSpan = p.telemetry.WithRequestID(ctx, "poller.fetch_events",
+				trace.WithAttributes(
+					attribute.Int(telemetry.AttrStartLedger, int(startLedger)),
+					attribute.Int(telemetry.AttrContractsWatched, len(contracts)),
+				),
+			)
+		}
+		page, err := p.source.FetchEvents(fetchCtx, startLedger, watch, cursor, stellar.DefaultEventsLimit)
 		if err != nil {
+			telemetry.RecordError(fetchSpan, err)
+			fetchSpan.End()
 			return err
 		}
+		fetchSpan.End()
+
 		if page.LatestLedger > 0 && (checkpoint == 0 || page.LatestLedger < checkpoint) {
 			checkpoint = page.LatestLedger
 		}
@@ -361,12 +444,15 @@ func (p *Poller) Poll(ctx context.Context) error {
 	return nil
 }
 
-// pollBatch pages through getEvents for one set of filters, following the
-// cursor until the stream is drained. Returns the node's latestLedger.
 // handleEvent runs every enabled rule of every monitor watching the
 // event's contract. Events arrive already decoded from the source;
 // per-event failures are logged, not fatal: one bad event must not stall
-// ingestion.
+// ingestion. Rule evaluation spans come from the registry, one per rule,
+// each a child of the cycle span, on the same trace as the fetch page that
+// produced the event.
+// handleEvent runs every enabled rule of every monitor watching the event's
+// contract. Events arrive already decoded from the source; the shared
+// Ingestor owns evaluation, alert persistence and dispatch.
 func (p *Poller) handleEvent(ctx context.Context, decoded *stellar.DecodedEvent, byContract map[string][]store.Monitor) {
 	monitors, watched := byContract[decoded.ContractID]
 	if !watched {
@@ -406,7 +492,25 @@ func (p *Poller) handleEvent(ctx context.Context, decoded *stellar.DecodedEvent,
 // fireAlert persists a deduped, cooldown-gated alert and hands it to the
 // dispatcher. The store owns both gates so they hold across poller instances
 // and restarts; this function only reports the outcome.
+//
+// The alert runs in its own span (poller.create_alert) under the poll
+// cycle; Dispatch is called with that span's context, so every delivery
+// span becomes a child of this alert's span — never a root. That parent
+// chain is what ties one alert's full path into one timeline, and the
+// poller test pins it.
 func (p *Poller) fireAlert(ctx context.Context, m store.Monitor, rule store.Rule, ev *stellar.DecodedEvent, eventID string) {
+	if p.telemetry != nil {
+		var span trace.Span
+		ctx, span = p.telemetry.WithRequestID(ctx, "poller.create_alert",
+			trace.WithAttributes(
+				attribute.Int64(telemetry.AttrMonitorID, m.ID),
+				attribute.Int64(telemetry.AttrRuleID, rule.ID),
+				attribute.String(telemetry.AttrEventID, eventID),
+			),
+		)
+		defer span.End()
+	}
+
 	body := map[string]any{
 		"contract_id":      ev.ContractID,
 		"event_name":       ev.EventName(),
@@ -435,6 +539,7 @@ func (p *Poller) fireAlert(ctx context.Context, m store.Monitor, rule store.Rule
 		Ledger:         ev.Ledger,
 		LedgerClosedAt: ev.LedgerClosedAt,
 		Cooldown:       ruleCooldown(rule),
+		Severity:       rule.Severity,
 	}
 	outcome, err := p.store.CreateAlert(ctx, alert)
 	if err != nil {
@@ -457,30 +562,20 @@ func (p *Poller) fireAlert(ctx context.Context, m store.Monitor, rule store.Rule
 	}
 	p.log.Info("alert created", logAttrs...)
 
-	// Grouping decision: if a window is configured, check the group
-	// state before dispatching. The first alert in the window is
-	// delivered immediately; subsequent alerts are suppressed until
-	// the window closes and a summary is delivered.
-	groupCount := int64(0)
-	windowStart := time.Time{}
-	windowEnd := time.Time{}
-	if p.GroupWindow > 0 {
-		windowStart = ev.LedgerClosedAt.Truncate(p.GroupWindow)
-		windowEnd = windowStart.Add(p.GroupWindow)
-		key := alerts.MakeGroupKey(m.ID, rule.ID, ev.ContractID).String()
-		count, err := p.store.CreateAlertGroup(ctx, key, windowStart)
-		if err != nil {
-			p.log.Error("create alert group", "key", key, "window_start", windowStart, "err", err)
-		} else {
-			groupCount = count
-			if count > 1 {
-				// This alert is part of an existing window: it is
-				// not delivered individually; the summary covers it.
-				p.log.Info("alert grouped, suppressed",
-					"key", key, "window_start", windowStart, "group_count", count)
-				return
-			}
-		}
+	// Publish before dispatching: a live dashboard should see the alert the
+	// moment it exists, not after the (possibly retried) channel fan-out.
+	// Only created alerts reach here — duplicates and cooldown-suppressed
+	// matches returned above — so the stream mirrors the alert table exactly.
+	if p.live != nil {
+		p.live.Publish(broadcast.Alert{
+			ID:          alert.ID,
+			MonitorID:   m.ID,
+			MonitorName: m.Name,
+			RuleID:      rule.ID,
+			EventID:     eventID,
+			Payload:     alert.Payload,
+			CreatedAt:   alert.CreatedAt,
+		})
 	}
 
 	p.dispatch.Dispatch(ctx, notify.Alert{
@@ -504,15 +599,4 @@ func (p *Poller) fireAlert(ctx context.Context, m store.Monitor, rule store.Rule
 		WindowStart: windowStart,
 		WindowEnd:   windowEnd,
 	})
-}
-
-// ruleCooldown reads a rule's optional cooldown. It is validated when the rule
-// is created, so a value that no longer parses is treated as "no cooldown"
-// rather than dropping matches.
-func ruleCooldown(rule store.Rule) time.Duration {
-	d, err := rules.ParseCooldown(rule.Params)
-	if err != nil {
-		return 0
-	}
-	return d
 }

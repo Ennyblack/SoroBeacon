@@ -68,6 +68,58 @@ func (p Priority) Rank() int {
 	}
 }
 
+// Severity is the alert severity level. It is a small closed set with a
+// fixed order so the API, store, and dispatcher all agree on the vocabulary
+// and ordering.
+type Severity string
+
+const (
+	// SeverityInfo is informational: routine matches that do not require
+	// immediate attention.
+	SeverityInfo Severity = "info"
+	// SeverityWarning is the default: notable events that should be seen
+	// but do not warrant paging.
+	SeverityWarning Severity = "warning"
+	// SeverityCritical is for high-impact events that require immediate
+	// response (e.g., treasury movements, contract upgrades).
+	SeverityCritical Severity = "critical"
+)
+
+// ParseSeverity validates a severity string. The empty string maps to
+// SeverityWarning so a caller that never sets one gets today's behaviour,
+// and any other unknown value is rejected rather than silently downgraded.
+func ParseSeverity(s string) (Severity, bool) {
+	switch Severity(s) {
+	case "":
+		return SeverityWarning, true
+	case SeverityInfo, SeverityWarning, SeverityCritical:
+		return Severity(s), true
+	default:
+		return "", false
+	}
+}
+
+// Rank orders the severities for routing: higher ranks are more severe.
+func (s Severity) Rank() int {
+	switch s {
+	case SeverityCritical:
+		return 2
+	case SeverityInfo:
+		return 0
+	default:
+		return 1
+	}
+}
+
+// MeetsThreshold reports whether this severity meets or exceeds the given
+// minimum severity. An empty minimum means no filter (always true).
+func (s Severity) MeetsThreshold(min Severity) bool {
+	if min == "" {
+		return true
+	}
+	return s.Rank() >= min.Rank()
+}
+
 // Monitor watches one or more Soroban contracts.
 type Monitor struct {
 	ID          int64     `json:"id"`
@@ -95,6 +147,10 @@ type Rule struct {
 	Type      string          `json:"type"`
 	Params    json.RawMessage `json:"params"`
 	Enabled   bool            `json:"enabled"`
+	// Severity is the alert severity this rule produces. Empty means
+	// SeverityWarning, so rules created before the field existed keep
+	// today's behaviour. It is validated at the API boundary.
+	Severity Severity `json:"severity"`
 }
 
 // Channel is a configured notification destination. Config holds
@@ -103,12 +159,26 @@ type Rule struct {
 // When a ConfigCipher is configured, Config is encrypted at rest and the
 // store returns it decrypted (see crypto.go).
 type Channel struct {
-	ID        int64           `json:"id"`
-	Name      string          `json:"name"`
-	Type      string          `json:"type"`
-	Config    json.RawMessage `json:"-"`
-	Enabled   bool            `json:"enabled"`
-	CreatedAt time.Time       `json:"created_at"`
+	ID     int64           `json:"id"`
+	Name   string          `json:"name"`
+	Type   string          `json:"type"`
+	Config json.RawMessage `json:"-"`
+	// Enabled controls whether the channel receives alerts at all.
+	Enabled bool `json:"enabled"`
+	// DigestMode selects batched delivery: "" (the default) sends every
+	// alert immediately, exactly as before digesting existed; "window"
+	// accumulates alerts and sends one summary per DigestWindowSeconds.
+	DigestMode string `json:"digest_mode"`
+	// DigestWindowSeconds is the accumulation window when DigestMode is
+	// "window". Zero leaves digesting off even when a mode is set, so a
+	// half-filled form cannot silently batch forever.
+	DigestWindowSeconds int64     `json:"digest_window_seconds"`
+	// MinSeverity is the minimum alert severity this channel will receive.
+	// Empty means no filter (receive all severities), so channels created
+	// before the field existed keep today's behaviour. It is validated at
+	// the API boundary.
+	MinSeverity Severity `json:"min_severity"`
+	CreatedAt           time.Time `json:"created_at"`
 }
 
 // Alert records one rule match on one event. EventID is the source event's
@@ -121,6 +191,10 @@ type Alert struct {
 	EventID   string          `json:"event_id"`
 	Payload   json.RawMessage `json:"payload"`
 	CreatedAt time.Time       `json:"created_at"`
+	// Severity is the alert severity copied from the rule at creation time.
+	// It is stored so changing a rule's severity later does not rewrite
+	// history.
+	Severity Severity `json:"severity"`
 	// LedgerClosedAt is the matching event's ledger close time. CreateAlert
 	// uses it to stamp monitors.last_matched_at; it is not stored on the
 	// alert row. Zero skips the stamp so callers that only persist an
@@ -144,6 +218,10 @@ type Alert struct {
 	// previous alert. CreateAlert also folds it into Payload so the stored
 	// alert and the dispatched notification both report it.
 	SuppressedSinceLast int64 `json:"-"`
+	// Backfilled marks an alert produced by a historical replay (see
+	// internal/backfill) rather than live ingestion. It is persisted so an
+	// operator can tell a replayed match from a real-time one.
+	Backfilled bool `json:"backfilled"`
 }
 
 // AlertOutcome reports what CreateAlert did with a match.
@@ -192,6 +270,25 @@ type IngestState struct {
 	UpdatedAt  time.Time `json:"updated_at"`
 }
 
+// Backfill is the persisted progress of a historical replay for one monitor.
+// A monitor has at most one row: an interrupted run resumes from
+// NextLedger/Cursor instead of starting over. Complete marks a finished run,
+// which a later backfill of the same monitor replaces.
+type Backfill struct {
+	MonitorID int64 `json:"monitor_id"`
+	// FromLedger and ToLedger are the inclusive range the run covers, kept so
+	// a resumed run reports the window it actually replayed.
+	FromLedger uint32 `json:"from_ledger"`
+	ToLedger   uint32 `json:"to_ledger"`
+	// NextLedger is the ledger to (re)request when a run restarts; Cursor is
+	// the source's opaque resume token from the last completed page.
+	NextLedger uint32    `json:"next_ledger"`
+	Cursor     string    `json:"cursor"`
+	Deliver    bool      `json:"deliver"`
+	Complete   bool      `json:"complete"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
 // LedgerHash is one recently ingested ledger's identity. The poller records
 // these as it advances and re-reads them each cycle; a ledger whose hash
 // changes is the signature of a chain reorganisation.
@@ -235,6 +332,8 @@ type AlertFilter struct {
 	// the cursor row; created_at_asc uses >. Comparing only on id would
 	// repeat or skip rows once sort is not newest-id.
 	AfterID int64
+	// Severity filters alerts by minimum severity. Empty means no filter.
+	Severity Severity
 	// Type filters channels by their notifier type ("slack", "discord",
 	// ...). Empty means no type filter. Only meaningful for channels.
 	Type string
@@ -367,6 +466,9 @@ type Channels interface {
 	ListChannelsPage(ctx context.Context, f ListFilter) ([]Channel, error)
 	UpdateChannel(ctx context.Context, c *Channel) error
 	DeleteChannel(ctx context.Context, id int64) error
+	// ListMonitorsForChannel returns monitors attached to a channel, including
+	// every attachment so callers can identify monitors left without a channel.
+	ListMonitorsForChannel(ctx context.Context, channelID int64) ([]Monitor, error)
 	// ListChannelsForMonitor returns the enabled channels a monitor alerts to.
 	ListChannelsForMonitor(ctx context.Context, monitorID int64) ([]Channel, error)
 }
@@ -404,6 +506,14 @@ type Ingest interface {
 	SetIngestState(ctx context.Context, s IngestState) error
 }
 
+// Backfills persists historical replay progress, so an interrupted backfill
+// resumes where it stopped instead of replaying the whole range. GetBackfill
+// returns ErrNotFound when the monitor has never been backfilled.
+type Backfills interface {
+	GetBackfill(ctx context.Context, monitorID int64) (Backfill, error)
+	UpsertBackfill(ctx context.Context, b *Backfill) error
+}
+
 // SavedSearch is a named, reusable alert filter combination.
 type SavedSearch struct {
 	ID        int64             `json:"id"`
@@ -430,6 +540,81 @@ type SavedSearches interface {
 	DeleteSavedSearch(ctx context.Context, id int64) error
 	SetDefaultSearch(ctx context.Context, id int64) error
 	ClearDefaultSearch(ctx context.Context, id int64) error
+}
+
+// Audit actions persisted on audit_log.action. A small closed set so the
+// API can filter on it and clients can branch on a stable token.
+const (
+	AuditActionCreate = "create"
+	AuditActionUpdate = "update"
+	AuditActionDelete = "delete"
+)
+
+// AuditEntry is one append-only record of a mutating operation on a monitor,
+// rule or channel. Diff records which fields were sent — never their values:
+// channel config holds webhook URLs, bot tokens and SMTP credentials, so only
+// the fact that a field changed is stored, never what it changed to.
+// Actor is the request ID today and will carry the authenticated principal
+// once auth identifies one; the column is a plain string so that needs no
+// migration.
+type AuditEntry struct {
+	ID         int64           `json:"id"`
+	Actor      string          `json:"actor"`
+	Action     string          `json:"action"`
+	TargetType string          `json:"target_type"`
+	TargetID   int64           `json:"target_id"`
+	Diff       json.RawMessage `json:"diff,omitempty"`
+	CreatedAt  time.Time       `json:"created_at"`
+}
+
+// AuditFilter narrows ListAuditEntries. Zero values mean "no constraint".
+type AuditFilter struct {
+	TargetType string
+	TargetID   int64
+	From       time.Time
+	To         time.Time
+	Limit      int
+}
+
+// Digest modes persisted on channels.digest_mode. The empty string means
+// immediate delivery.
+const (
+	DigestModeOff    = ""
+	DigestModeWindow = "window"
+)
+
+// DigestAlert is one alert waiting to be summarised into a channel digest.
+// Payload is the serialised notify.Alert; the store keeps it opaque so the
+// store package does not depend on the notification layer.
+type DigestAlert struct {
+	ID        int64           `json:"id"`
+	ChannelID int64           `json:"channel_id"`
+	Payload   json.RawMessage `json:"payload"`
+	CreatedAt time.Time       `json:"created_at"`
+}
+
+// DigestQueue persists alerts awaiting a channel's digest flush so a restart
+// does not silently drop a partial window. Rows are owned by the channel and
+// cascade when it is deleted.
+type DigestQueue interface {
+	// PushDigestAlert appends one serialised alert to a channel's window.
+	PushDigestAlert(ctx context.Context, channelID int64, payload json.RawMessage) error
+	// ListDigestAlerts returns a channel's pending alerts oldest first.
+	ListDigestAlerts(ctx context.Context, channelID int64) ([]DigestAlert, error)
+	// DeleteDigestAlerts removes the flushed rows by id. Deleting by id
+	// rather than draining the channel keeps an alert that arrived during
+	// the flush from being dropped.
+	DeleteDigestAlerts(ctx context.Context, channelID int64, ids []int64) error
+}
+
+// Audits is append-only by design: there is deliberately no Update or Delete
+// method, so nothing can rewrite or erase the log through the store.
+type Audits interface {
+	// CreateAuditEntry appends one entry and fills in its ID and CreatedAt.
+	CreateAuditEntry(ctx context.Context, e *AuditEntry) error
+	// ListAuditEntries returns entries newest first, at most f.Limit of
+	// them (default and cap applied by the store).
+	ListAuditEntries(ctx context.Context, f AuditFilter) ([]AuditEntry, error)
 }
 
 // MonitorTemplate defines a reusable monitor shape. Monitors created from
@@ -469,6 +654,19 @@ type MonitorTemplates interface {
 	DeleteMonitorTemplate(ctx context.Context, id int64) error
 }
 
+// BackupChannel is a Channel with its Config included for configuration
+// export. The normal Channel tags Config with json:"-" to prevent leaks
+// through the API; the backup path needs the decrypted config and controls
+// its own output.
+type BackupChannel struct {
+	ID        int64           `json:"id"`
+	Name      string          `json:"name"`
+	Type      string          `json:"type"`
+	Config    json.RawMessage `json:"config"`
+	Enabled   bool            `json:"enabled"`
+	CreatedAt time.Time       `json:"created_at"`
+}
+
 // Store is everything the application needs from persistence.
 type Store interface {
 	Monitors
@@ -476,9 +674,12 @@ type Store interface {
 	Channels
 	Alerts
 	Ingest
+	Backfills
 	Ledgers
 	SavedSearches
 	MonitorTemplates
+	Audits
+	DigestQueue
 	GetStats(ctx context.Context) (Stats, error)
 	// AlertCountsByDay returns UTC calendar-day alert totals for `days`
 	// consecutive days ending today (UTC). Days with no alerts are present

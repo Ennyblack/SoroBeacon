@@ -19,6 +19,7 @@
   "paths": {
     "/monitors": {
       "post": {
+        "description": "Required role: editor",
         "summary": "Create a monitor",
         "requestBody": {
           "required": true,
@@ -41,6 +42,7 @@
         }
       },
       "get": {
+        "description": "Required role: viewer",
         "summary": "List monitors",
         "parameters": [
           {
@@ -87,6 +89,7 @@
     },
     "/monitors/bulk": {
       "post": {
+        "description": "Required role: editor",
         "summary": "Bulk enable or disable monitors",
         "description": "Sets enabled on an explicit list of monitor IDs in one statement. Unknown IDs are returned and do not prevent the known ones from applying. There is no all-monitors shorthand.",
         "requestBody": {
@@ -530,58 +533,24 @@
         }
       }
     },
-    "/alerts/export": {
+    "/alerts/stream": {
       "get": {
-        "summary": "Export alerts as NDJSON",
-        "description": "Streams every alert matching the same filters as GET /alerts as application/x-ndjson. The export is capped at maxAlertExportRows.",
+        "summary": "Stream alerts as they are created (Server-Sent Events)",
+        "description": "Opens a text/event-stream response that emits an `alert` event for every alert created after the connection opened. SSE rather than WebSockets: the traffic is one-directional and SSE reconnects on its own. An optional monitor_id filters server-side. Comment lines (keep-alives) are sent periodically so idle connections are not reaped by a proxy, and the stream advertises a 3000ms retry hint. A subscriber that cannot keep up loses its oldest queued events rather than blocking alert creation.",
         "parameters": [
           {
             "name": "monitor_id",
             "in": "query",
-            "schema": { "type": "integer", "format": "int64" }
-          },
-          {
-            "name": "rule_id",
-            "in": "query",
-            "schema": { "type": "integer", "format": "int64" }
-          },
-          {
-            "name": "contract_id",
-            "in": "query",
-            "schema": { "type": "string" },
-            "description": "Exact match on payload->>'contract_id'"
-          },
-          {
-            "name": "sort",
-            "in": "query",
-            "schema": { "type": "string", "enum": ["created_at_desc", "created_at_asc"], "default": "created_at_desc" },
-            "description": "Keyset order; anything else is 400"
-          },
-          {
-            "name": "from",
-            "in": "query",
-            "schema": { "type": "string", "format": "date-time" },
-            "description": "RFC 3339 lower bound on alert creation"
-          },
-          {
-            "name": "to",
-            "in": "query",
-            "schema": { "type": "string", "format": "date-time" },
-            "description": "RFC 3339 upper bound on alert creation"
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "schema": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 10000 },
-            "description": "Maximum rows to export; the endpoint caps at 10000"
+            "schema": { "type": "integer", "format": "int64" },
+            "description": "Only stream alerts created by this monitor"
           }
         ],
         "responses": {
           "200": {
-            "description": "Alerts as NDJSON",
+            "description": "Server-Sent Events stream; each `alert` event's data is one alert object",
             "content": {
-              "application/x-ndjson": {
-                "schema": { "type": "string" }
+              "text/event-stream": {
+                "schema": { "$ref": "#/components/schemas/Alert" }
               }
             }
           },
@@ -762,6 +731,47 @@
         }
       }
     },
+    "/ingest": {
+      "post": {
+        "summary": "Receive a federated alert from another SoroBeacon instance",
+        "description": "Stores an alert forwarded by another instance without re-evaluating rules. The alert is stamped with its origin and hop count for loop prevention. Requires authentication.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["alert", "origin"],
+                "properties": {
+                  "alert": { "$ref": "#/components/schemas/Alert" },
+                  "origin": { "type": "string", "description": "Instance identifier of the originating SoroBeacon" },
+                  "hop_count": { "type": "integer", "minimum": 0, "maximum": 8, "description": "Number of hops this alert has traversed" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Alert ingested",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "outcome": { "type": "string", "enum": ["created", "duplicate", "suppressed"] },
+                    "alert_id": { "type": "integer", "format": "int64" },
+                    "origin": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
     "/health": {
       "get": {
         "summary": "Combined health report",
@@ -791,6 +801,23 @@
         "responses": {
           "200": { "description": "Ready" },
           "503": { "description": "At least one dependency unhealthy" }
+        }
+      }
+    },
+    "/poller": {
+      "get": {
+        "summary": "Poller position and lag",
+        "description": "Reports the last successful poll position, chain tip, ledger lag, and whether the poller is currently backing off. Before the first successful poll, position fields are omitted and status is waiting. No configuration values are returned.",
+        "responses": {
+          "200": {
+            "description": "Poller status",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PollerStatus" }
+              }
+            }
+          },
+          "503": { "description": "Poller is not configured" }
         }
       }
     },
@@ -854,6 +881,51 @@
               }
             }
           }
+        }
+      }
+    },
+    "/audit": {
+      "get": {
+        "summary": "Audit log of configuration changes",
+        "description": "Append-only entries for monitor, rule and channel create, update and delete. diff records field names only, never values.",
+        "parameters": [
+          { "name": "target_type", "in": "query", "schema": { "type": "string", "enum": ["monitor", "rule", "channel"] } },
+          { "name": "target_id", "in": "query", "schema": { "type": "integer", "format": "int64" } },
+          { "name": "from", "in": "query", "schema": { "type": "string", "format": "date-time" } },
+          { "name": "to", "in": "query", "schema": { "type": "string", "format": "date-time" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 500 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Audit entries, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["entries"],
+                  "properties": {
+                    "entries": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": ["id", "actor", "action", "target_type", "target_id", "created_at"],
+                        "properties": {
+                          "id": { "type": "integer", "format": "int64" },
+                          "actor": { "type": "string" },
+                          "action": { "type": "string", "enum": ["create", "update", "delete"] },
+                          "target_type": { "type": "string", "enum": ["monitor", "rule", "channel"] },
+                          "target_id": { "type": "integer", "format": "int64" },
+                          "diff": { "type": "object" },
+                          "created_at": { "type": "string", "format": "date-time" }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Error" }
         }
       }
     },
@@ -1237,7 +1309,19 @@
             "type": "object",
             "description": "Type-specific; the channel reference documents each"
           },
-          "enabled": { "type": "boolean", "default": true }
+          "enabled": { "type": "boolean", "default": true },
+          "digest_mode": {
+            "type": "string",
+            "enum": ["", "window"],
+            "default": "",
+            "description": "Empty delivers immediately; window batches into one summary per digest_window_seconds"
+          },
+          "digest_window_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Accumulation window when digest_mode is window; must be > 0 then"
+          }
         }
       },
       "MonitorPage": {
@@ -1311,6 +1395,18 @@
           "version": { "type": "string" },
           "commit": { "type": "string" },
           "build_date": { "type": "string" }
+        }
+      },
+      "PollerStatus": {
+        "type": "object",
+        "required": ["status", "backing_off"],
+        "properties": {
+          "status": { "type": "string", "enum": ["waiting", "ok"] },
+          "last_processed_ledger": { "type": "integer", "format": "int64" },
+          "latest_chain_ledger": { "type": "integer", "format": "int64" },
+          "ledger_lag": { "type": "integer", "format": "int64" },
+          "last_successful_poll": { "type": "string", "format": "date-time" },
+          "backing_off": { "type": "boolean" }
         }
       },
       "MonitorTemplate": {
