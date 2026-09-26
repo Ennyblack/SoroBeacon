@@ -30,6 +30,7 @@ import (
 	"github.com/sorotrail/sorobeacon/internal/poller"
 	"github.com/sorotrail/sorobeacon/internal/reqid"
 	"github.com/sorotrail/sorobeacon/internal/rules"
+	"github.com/sorotrail/sorobeacon/internal/secrets"
 	"github.com/sorotrail/sorobeacon/internal/sorotrail"
 	"github.com/sorotrail/sorobeacon/internal/stellar"
 	"github.com/sorotrail/sorobeacon/internal/store"
@@ -232,6 +233,7 @@ func run() error {
 		}
 	}()
 	go p.Run(ctx)
+	go dispatcher.RunDigestFlusher(ctx, notify.DefaultDigestFlushInterval)
 	if cfg.GRPCAddr != "" {
 		grpcSrv := sorogrpc.New(st, authn, log)
 		go func() {
@@ -276,6 +278,23 @@ func run() error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return httpSrv.Shutdown(shutdownCtx)
+}
+
+// buildSecretResolver selects the external-secret provider named by
+// SECRETS_PROVIDER. It returns nil when external secrets are disabled, so
+// the factory treats ${secret:...} strings as literals exactly as it did
+// before the feature. The Vault token is a credential and is never logged.
+func buildSecretResolver(cfg config.Config, log *slog.Logger) *secrets.Resolver {
+	switch cfg.SecretsProvider {
+	case "env":
+		log.Info("external secrets enabled", "secrets_provider", "env", "cache_ttl", cfg.SecretsCacheTTL.String())
+		return secrets.NewResolver(secrets.NewEnvProvider()).WithTTL(cfg.SecretsCacheTTL)
+	case "vault":
+		log.Info("external secrets enabled", "secrets_provider", "vault", "vault_addr", cfg.VaultAddr, "cache_ttl", cfg.SecretsCacheTTL.String())
+		return secrets.NewResolver(secrets.NewVaultProvider(cfg.VaultAddr, cfg.VaultToken, cfg.VaultNamespace)).WithTTL(cfg.SecretsCacheTTL)
+	default:
+		return nil
+	}
 }
 
 // buildSource wires the configured event source and its health checker. It is
