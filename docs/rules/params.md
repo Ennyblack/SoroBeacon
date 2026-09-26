@@ -5,8 +5,8 @@ validators in `internal/rules` (the `Validate` and `parse*` functions there
 are the authority). Each rule also has a page of its own with matching
 semantics and more examples — [event\_emitted](event-emitted.md),
 [value\_threshold](value-threshold.md), [token\_event](token-event.md),
-[frequency\_threshold](frequency-threshold.md), and the cross-cutting
-[cooldown](cooldown.md).
+[frequency\_threshold](frequency-threshold.md), [topic\_regex](topic-regex.md),
+and the cross-cutting [cooldown](cooldown.md).
 
 ## Conventions that apply to every rule type
 
@@ -115,6 +115,25 @@ Complete, valid params document:
   "event": "transfer",
   "from": "GDW6AUTBXTOC7FIKUO5BOO3OGLK4SF7ZPOBLMQHMZDI45J2Z6VXRB5NR",
   "min_amount": "1000000000"
+}
+```
+
+## topic\_regex
+
+RE2 pattern match against a decoded topic — at a position, or any topic.
+See the [rule page](topic-regex.md) for matching semantics.
+
+| Param | JSON type | Required | Default | Meaning |
+| --- | --- | --- | --- | --- |
+| `pattern` | string | yes | — | Go/RE2 regular expression, matched unanchored within a topic's string value. At most 512 bytes. |
+| `position` | number | no | unset (any topic) | Topic index to match; `0` is the event name, user topics start at `1`. A position outside the event's topic list simply doesn't match. |
+
+Complete, valid params document:
+
+```json
+{
+  "pattern": "^swap_",
+  "position": 0
 }
 ```
 

@@ -19,6 +19,7 @@ const (
 	TypeEventEmitted       = "event_emitted"
 	TypeValueThreshold     = "value_threshold"
 	TypeFrequencyThreshold = "frequency_threshold"
+	TypeTopicRegex         = "topic_regex"
 )
 
 // RuleEvaluator decides whether one decoded event matches one rule.
@@ -85,6 +86,7 @@ func NewRegistry() *Registry {
 	r.Register(TypeValueThreshold, ValueThreshold{})
 	r.Register(TypeTokenEvent, TokenEvent{})
 	r.Register(TypeFrequencyThreshold, NewFrequencyThreshold())
+	r.Register(TypeTopicRegex, &TopicRegex{})
 	return r
 }
 
