@@ -12,6 +12,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/sorotrail/sorobeacon/internal/broadcast"
 	"github.com/sorotrail/sorobeacon/internal/metrics"
 	"github.com/sorotrail/sorobeacon/internal/notify"
 	"github.com/sorotrail/sorobeacon/internal/rules"
@@ -43,6 +44,8 @@ type Store interface {
 	ListMonitors(ctx context.Context, enabledOnly bool) ([]store.Monitor, error)
 	ListRules(ctx context.Context, monitorID int64, enabledOnly bool) ([]store.Rule, error)
 	CreateAlert(ctx context.Context, a *store.Alert) (store.AlertOutcome, error)
+	GroupAlerts(ctx context.Context, key string, windowStart time.Time) (shouldDeliver bool, currentCount int64, err error)
+	CreateAlertGroup(ctx context.Context, key string, windowStart time.Time) (int64, error)
 	GetIngestState(ctx context.Context) (store.IngestState, error)
 	SetIngestState(ctx context.Context, s store.IngestState) error
 	// The ledger-hash window backing reorg detection, and the retraction
@@ -72,6 +75,10 @@ type Poller struct {
 	// ing evaluates events and records alerts; shared with the backfill job
 	// so a historical replay and live ingestion match identically.
 	ing *Ingestor
+	// live is the in-process fan-out that serves the SSE endpoint. When set,
+	// every created alert is published the moment it is persisted, so a
+	// connected dashboard sees it without a database round-trip.
+	live *broadcast.Broadcaster
 	// metrics is optional instrumentation; nil-safe, see internal/metrics.
 	metrics *metrics.Metrics
 	// telemetry is optional tracing; nil-safe like metrics. When set, every
@@ -139,6 +146,16 @@ func New(src EventSource, st Store, reg *rules.Registry, d Dispatcher, interval 
 func (p *Poller) WithMetrics(m *metrics.Metrics) *Poller {
 	p.metrics = m
 	p.ing = p.ing.WithMetrics(m)
+	return p
+}
+
+// WithPublisher attaches the live fan-out that serves the SSE endpoint. The
+// same Broadcaster is handed to internal/api: the shared Ingestor publishes
+// into it as alerts are created and /alerts/stream reads out of it, so no
+// database round-trip is needed to see an alert appear on a connected
+// dashboard.
+func (p *Poller) WithPublisher(b *broadcast.Broadcaster) *Poller {
+	p.live = b
 	return p
 }
 
@@ -522,6 +539,7 @@ func (p *Poller) fireAlert(ctx context.Context, m store.Monitor, rule store.Rule
 		Ledger:         ev.Ledger,
 		LedgerClosedAt: ev.LedgerClosedAt,
 		Cooldown:       ruleCooldown(rule),
+		Severity:       rule.Severity,
 	}
 	outcome, err := p.store.CreateAlert(ctx, alert)
 	if err != nil {
@@ -544,6 +562,22 @@ func (p *Poller) fireAlert(ctx context.Context, m store.Monitor, rule store.Rule
 	}
 	p.log.Info("alert created", logAttrs...)
 
+	// Publish before dispatching: a live dashboard should see the alert the
+	// moment it exists, not after the (possibly retried) channel fan-out.
+	// Only created alerts reach here — duplicates and cooldown-suppressed
+	// matches returned above — so the stream mirrors the alert table exactly.
+	if p.live != nil {
+		p.live.Publish(broadcast.Alert{
+			ID:          alert.ID,
+			MonitorID:   m.ID,
+			MonitorName: m.Name,
+			RuleID:      rule.ID,
+			EventID:     eventID,
+			Payload:     alert.Payload,
+			CreatedAt:   alert.CreatedAt,
+		})
+	}
+
 	p.dispatch.Dispatch(ctx, notify.Alert{
 		ID:          alert.ID,
 		MonitorID:   m.ID,
@@ -559,5 +593,10 @@ func (p *Poller) fireAlert(ctx context.Context, m store.Monitor, rule store.Rule
 		// notification reports it too.
 		Payload:   alert.Payload,
 		CreatedAt: alert.CreatedAt,
+		// GroupCount is 1 for the first alert in a window (the one
+		// we are delivering now) and 0 when grouping is disabled.
+		GroupCount: groupCount,
+		WindowStart: windowStart,
+		WindowEnd:   windowEnd,
 	})
 }

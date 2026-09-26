@@ -211,3 +211,34 @@ func (r *Registry) Validate(ruleType string, params json.RawMessage) error {
 	_, err := ParseCooldown(params)
 	return err
 }
+
+// DryRunResult is the result of evaluating a rule against historical events.
+type DryRunResult struct {
+	Matches []*stellar.DecodedEvent
+	Count   int
+}
+
+// DryRun evaluates candidate rule params against a slice of historical
+// events using the production evaluation path. It returns the events
+// that matched the rule. Nothing is persisted and nothing is delivered.
+//
+// Design decision: the event corpus used here is stored alert payloads,
+// which are biased because only matched events are captured. The caller
+// documents this bias in the response note.
+func (r *Registry) DryRun(ctx context.Context, ruleType string, events []*stellar.DecodedEvent, params json.RawMessage) ([]*stellar.DecodedEvent, error) {
+	e, ok := r.evaluators[ruleType]
+	if !ok {
+		return nil, fmt.Errorf("unknown rule type %q", ruleType)
+	}
+	matches := make([]*stellar.DecodedEvent, 0, len(events))
+	for _, ev := range events {
+		matched, err := e.Evaluate(ctx, ev, params)
+		if err != nil {
+			return nil, err
+		}
+		if matched {
+			matches = append(matches, ev)
+		}
+	}
+	return matches, nil
+}
