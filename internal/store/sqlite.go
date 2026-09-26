@@ -1429,6 +1429,12 @@ func (s *SQLite) AlertCountsByDay(ctx context.Context, days int) ([]AlertDayCoun
 }
 
 // --- saved searches ---
+//
+// The saved-search and monitor-template methods below mirror the Postgres
+// backend statement for statement so the two backends cannot drift. SQLite
+// holds the JSON columns as TEXT carrying the same bytes Postgres stores in
+// JSONB, and channel_ids as a JSON array of ids instead of BIGINT[]; ordering,
+// the single-default invariant and ErrNotFound on a missing row are identical.
 
 func (s *SQLite) CreateSavedSearch(ctx context.Context, ss *SavedSearch) error {
 	filter, err := json.Marshal(ss.Filter)
@@ -1442,12 +1448,31 @@ func (s *SQLite) CreateSavedSearch(ctx context.Context, ss *SavedSearch) error {
 	}
 	var created string
 	if err := s.db.QueryRowContext(ctx,
-		`INSERT INTO saved_searches (name, filter, is_default) VALUES (?, ?, ?) RETURNING id, created_at`,
-		ss.Name, string(filter), boolToInt(ss.IsDefault)).Scan(&ss.ID, &created); err != nil {
+		`INSERT INTO saved_searches (name, filter, is_default) VALUES (?, ?, ?)
+		 RETURNING id, created_at`,
+		ss.Name, string(filter), boolToInt(ss.IsDefault),
+	).Scan(&ss.ID, &created); err != nil {
 		return mapSQLiteErr(err)
 	}
 	ss.CreatedAt, err = parseSQLiteTime(created)
 	return err
+}
+
+func scanSQLiteSavedSearch(r rowScanner) (SavedSearch, error) {
+	var ss SavedSearch
+	var filter string
+	var isDefault int64
+	var created string
+	if err := r.Scan(&ss.ID, &ss.Name, &filter, &isDefault, &created); err != nil {
+		return ss, mapSQLiteErr(err)
+	}
+	ss.IsDefault = isDefault != 0
+	_ = json.Unmarshal([]byte(filter), &ss.Filter)
+	var err error
+	if ss.CreatedAt, err = parseSQLiteTime(created); err != nil {
+		return ss, err
+	}
+	return ss, nil
 }
 
 func (s *SQLite) ListSavedSearches(ctx context.Context) ([]SavedSearch, error) {
@@ -1477,23 +1502,6 @@ func (s *SQLite) GetSavedSearch(ctx context.Context, id int64) (*SavedSearch, er
 	return &ss, nil
 }
 
-func scanSQLiteSavedSearch(r rowScanner) (SavedSearch, error) {
-	var ss SavedSearch
-	var filter string
-	var isDefault int64
-	var created string
-	if err := r.Scan(&ss.ID, &ss.Name, &filter, &isDefault, &created); err != nil {
-		return ss, mapSQLiteErr(err)
-	}
-	ss.IsDefault = isDefault != 0
-	_ = json.Unmarshal([]byte(filter), &ss.Filter)
-	var err error
-	if ss.CreatedAt, err = parseSQLiteTime(created); err != nil {
-		return ss, err
-	}
-	return ss, nil
-}
-
 func (s *SQLite) DeleteSavedSearch(ctx context.Context, id int64) error {
 	return s.deleteByID(ctx, "saved_searches", id)
 }
@@ -1508,7 +1516,7 @@ func (s *SQLite) SetDefaultSearch(ctx context.Context, id int64) error {
 	defer func() { _ = tx.Rollback() }() // rollback after commit is a no-op
 
 	if _, err := tx.ExecContext(ctx, `UPDATE saved_searches SET is_default = 0 WHERE is_default = 1`); err != nil {
-		return err
+		return mapSQLiteErr(err)
 	}
 	res, err := tx.ExecContext(ctx, `UPDATE saved_searches SET is_default = 1 WHERE id = ?`, id)
 	if err != nil {
@@ -1540,6 +1548,28 @@ func (s *SQLite) ClearDefaultSearch(ctx context.Context, id int64) error {
 }
 
 // --- monitor templates ---
+
+// scanSQLiteTemplate reads one template row of the fixed column order
+// shared with Postgres: id, name, description, rules, channel_ids, parameters,
+// created_at.
+func scanSQLiteTemplate(r rowScanner) (MonitorTemplate, error) {
+	var t MonitorTemplate
+	var rulesJSON, channelJSON, paramsJSON, created string
+	if err := r.Scan(&t.ID, &t.Name, &t.Description, &rulesJSON, &channelJSON, &paramsJSON, &created); err != nil {
+		return t, mapSQLiteErr(err)
+	}
+	_ = json.Unmarshal([]byte(rulesJSON), &t.Rules)
+	_ = json.Unmarshal([]byte(channelJSON), &t.ChannelIDs)
+	_ = json.Unmarshal([]byte(paramsJSON), &t.Parameters)
+	if t.ChannelIDs == nil {
+		t.ChannelIDs = []int64{}
+	}
+	var err error
+	if t.CreatedAt, err = parseSQLiteTime(created); err != nil {
+		return t, err
+	}
+	return t, nil
+}
 
 func (s *SQLite) CreateMonitorTemplate(ctx context.Context, t *MonitorTemplate) error {
 	rulesJSON, _ := json.Marshal(t.Rules)
@@ -1581,25 +1611,6 @@ func (s *SQLite) ListMonitorTemplates(ctx context.Context) ([]MonitorTemplate, e
 		out = append(out, t)
 	}
 	return out, rows.Err()
-}
-
-func scanSQLiteTemplate(r rowScanner) (MonitorTemplate, error) {
-	var t MonitorTemplate
-	var rulesJSON, channelJSON, paramsJSON, created string
-	if err := r.Scan(&t.ID, &t.Name, &t.Description, &rulesJSON, &channelJSON, &paramsJSON, &created); err != nil {
-		return t, mapSQLiteErr(err)
-	}
-	_ = json.Unmarshal([]byte(rulesJSON), &t.Rules)
-	_ = json.Unmarshal([]byte(channelJSON), &t.ChannelIDs)
-	_ = json.Unmarshal([]byte(paramsJSON), &t.Parameters)
-	if t.ChannelIDs == nil {
-		t.ChannelIDs = []int64{}
-	}
-	var err error
-	if t.CreatedAt, err = parseSQLiteTime(created); err != nil {
-		return t, err
-	}
-	return t, nil
 }
 
 func (s *SQLite) UpdateMonitorTemplate(ctx context.Context, t *MonitorTemplate) error {

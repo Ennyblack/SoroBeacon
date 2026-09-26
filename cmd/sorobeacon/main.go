@@ -34,6 +34,7 @@ import (
 	"github.com/sorotrail/sorobeacon/internal/sorotrail"
 	"github.com/sorotrail/sorobeacon/internal/stellar"
 	"github.com/sorotrail/sorobeacon/internal/store"
+	"github.com/sorotrail/sorobeacon/internal/telemetry"
 	"github.com/sorotrail/sorobeacon/internal/web"
 )
 
@@ -116,6 +117,34 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// Tracing is entirely off unless OTLP_ENDPOINT is set; with it unset
+	// Setup installs a no-op provider, spans cost nothing and Shutdown is
+	// a no-op. When enabled, the flush below must run before the process
+	// exits or the last spans of a deployment — often the interesting ones
+	// — are dropped with the batcher's queue.
+	tel, err := telemetry.Setup(ctx, telemetry.Config{
+		Endpoint:    cfg.OTLP.Endpoint,
+		ServiceName: cfg.OTLP.ServiceName,
+		SampleRate:  cfg.OTLP.SampleRate,
+	})
+	if err != nil {
+		return err
+	}
+	if tel.Enabled() {
+		log.Info("opentelemetry tracing enabled",
+			"otlp_endpoint", cfg.OTLP.Endpoint,
+			"otlp_service_name", cfg.OTLP.ServiceName,
+			"otlp_sample_rate", cfg.OTLP.SampleRate)
+	}
+	defer func() {
+		// Bounded so a hung collector delays shutdown by at most this long.
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := tel.Shutdown(flushCtx); err != nil {
+			log.Warn("flush pending spans on shutdown", "error", err)
+		}
+	}()
+
 	// Storage. The DATABASE_URL scheme selects the backend: postgres /
 	// postgresql for the pgx pool, sqlite for a single-file database that
 	// removes the Postgres prerequisite on a small VPS or Raspberry Pi. Both
@@ -131,6 +160,15 @@ func run() error {
 	}, configCipher)
 	if err != nil {
 		return err
+	}
+	// store.New hands back the Store interface, which deliberately carries no
+	// telemetry: a backend without spans, and every test fake, would
+	// otherwise have to grow a no-op method for it. Narrow to the backend
+	// that does open store.create_alert spans instead; the other backends
+	// still contribute their stage to the trace through the poller, rules and
+	// dispatcher, they simply add no span of their own here.
+	if p, ok := st.(*store.Postgres); ok {
+		p.WithTelemetry(tel)
 	}
 	defer st.Close()
 	log.Info("database ready", "backend", store.BackendName(cfg.DatabaseURL))
