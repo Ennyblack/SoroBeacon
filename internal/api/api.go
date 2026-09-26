@@ -125,6 +125,9 @@ func (s *Server) Routes() chi.Router {
 	r.Use(AuthMiddleware(s.auth))
 	r.Use(auth.RoleMiddleware(s.roles, auth.RoleViewer))
 	r.Use(RateLimitMiddleware(s.rateLimit))
+	// Innermost, so only authenticated, rate-limited requests are audited
+	// and an audit failure never blocks the request.
+	r.Use(AuditMiddleware(s.store, s.log))
 	// JSON clients hitting a typo'd path or the wrong method should get
 	// the same envelope as every other API error, not chi's plain-text
 	// 404/405. The dashboard mux is a different router and is untouched.
@@ -183,6 +186,7 @@ func (s *Server) Routes() chi.Router {
 	r.Get("/version", s.version)
 	r.Get("/stats", s.stats)
 	r.Get("/stats/alerts-daily", s.alertsDaily)
+	r.Get("/audit", s.listAudit)
 
 	return r
 }
