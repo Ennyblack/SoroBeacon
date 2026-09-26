@@ -36,6 +36,8 @@
 * [Matrix](channels/matrix.md)
 * [PagerDuty](channels/pagerduty.md)
 * [Message templates](channels/templates.md)
+* [External secrets](channels/secrets.md)
+* [Digest mode](channels/digest.md)
 
 ## 📏 Operations
 
