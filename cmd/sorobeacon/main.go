@@ -172,6 +172,12 @@ func run() error {
 			return records, nil
 		})))
 	factory := notify.DefaultFactory()
+	// External secrets: when a provider is configured, ${secret:...}
+	// references in channel configs resolve when a notifier is built. The
+	// stored config keeps the reference.
+	if resolver := buildSecretResolver(cfg, log); resolver != nil {
+		factory.WithSecrets(resolver)
+	}
 	dispatcher := notify.NewDispatcher(st, factory, log).WithMetrics(m)
 	// One in-process fan-out carries newly created alerts to the SSE endpoint.
 	// The poller publishes into exactly the instance the API serves from, so
