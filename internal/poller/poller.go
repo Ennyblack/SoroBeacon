@@ -4,9 +4,13 @@ package poller
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"sync/atomic"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/sorotrail/sorobeacon/internal/broadcast"
 	"github.com/sorotrail/sorobeacon/internal/metrics"
@@ -14,6 +18,7 @@ import (
 	"github.com/sorotrail/sorobeacon/internal/rules"
 	"github.com/sorotrail/sorobeacon/internal/stellar"
 	"github.com/sorotrail/sorobeacon/internal/store"
+	"github.com/sorotrail/sorobeacon/internal/telemetry"
 )
 
 // Position is a race-free snapshot of how far the poller has got relative
@@ -63,11 +68,21 @@ type Poller struct {
 	registry *rules.Registry
 	interval time.Duration
 	log      *slog.Logger
+	// dispatch receives every newly created alert.
+	dispatch Dispatcher
 	// ing evaluates events and records alerts; shared with the backfill job
 	// so a historical replay and live ingestion match identically.
 	ing *Ingestor
+	// live is the in-process fan-out that serves the SSE endpoint. When set,
+	// every created alert is published the moment it is persisted, so a
+	// connected dashboard sees it without a database round-trip.
+	live *broadcast.Broadcaster
 	// metrics is optional instrumentation; nil-safe, see internal/metrics.
 	metrics *metrics.Metrics
+	// telemetry is optional tracing; nil-safe like metrics. When set, every
+	// poll cycle becomes one trace: fetch, decode, rule evaluation, the
+	// alert write and each channel delivery hang off the same root span.
+	telemetry *telemetry.Provider
 	// scanned/matched accumulate per-cycle counts for metrics.
 	scanned int
 	matched int
@@ -119,6 +134,7 @@ func New(src EventSource, st Store, reg *rules.Registry, d Dispatcher, interval 
 		registry: reg,
 		interval: interval,
 		log:      log,
+		dispatch: d,
 		ing:      NewIngestor(st, reg, d, log),
 		sched:    NewScheduler(),
 	}
@@ -137,7 +153,15 @@ func (p *Poller) WithMetrics(m *metrics.Metrics) *Poller {
 // database round-trip is needed to see an alert appear on a connected
 // dashboard.
 func (p *Poller) WithPublisher(b *broadcast.Broadcaster) *Poller {
-	p.ing = p.ing.WithPublisher(b)
+	p.live = b
+	return p
+}
+
+// WithTelemetry attaches tracing to the ingest pipeline. The provider's
+// own disabled state decides whether anything is exported; a nil provider
+// means no spans at all.
+func (p *Poller) WithTelemetry(t *telemetry.Provider) *Poller {
+	p.telemetry = t
 	return p
 }
 
@@ -184,9 +208,25 @@ func (p *Poller) Run(ctx context.Context) {
 	}
 }
 
-// Poll runs one ingest cycle. Exported so tests (and one-shot tools) can
-// drive the poller without the timing loop.
+// Poll runs one ingest cycle as a single trace. The root span
+// (poller.poll) covers the whole cycle; fetch, rule evaluation, the alert
+// write and — via the context the alert's span rides in — every channel
+// delivery hang underneath it, so one late alert is one timeline answering
+// which stage was slow. Exported so tests (and one-shot tools) can drive
+// the poller without the timing loop.
 func (p *Poller) Poll(ctx context.Context) error {
+	if p.telemetry != nil {
+		var span trace.Span
+		ctx, span = p.telemetry.WithRequestID(ctx, "poller.poll")
+		defer func() {
+			telemetry.SetAttrs(span,
+				telemetry.AttrEventsScanned, p.scanned,
+				telemetry.AttrEventsMatched, p.matched,
+			)
+			span.End()
+		}()
+	}
+
 	monitors, err := p.store.ListMonitors(ctx, true)
 	if err != nil {
 		return err
@@ -323,10 +363,32 @@ func (p *Poller) Poll(ctx context.Context) error {
 	tierLedger := map[store.Priority]uint32{}
 	cursor := ""
 	for {
-		page, err := p.source.FetchEvents(ctx, startLedger, watch, cursor, stellar.DefaultEventsLimit)
+		// One span per page covers both halves of the fetch: the RPC call
+		// (or indexer request) and the local decode of what came back. That
+		// is the "RPC fetch" stage of the slow-alert question; decode time
+		// is inside it by design, since the source owns decoding. The span
+		// ends before handleEvent so pages stay siblings under the cycle
+		// span — otherwise page two would parent to page one.
+		fetchCtx := ctx
+		// NoopSpan keeps the error/End calls below uniform when tracing is
+		// off — a nil interface would panic on End.
+		fetchSpan := telemetry.NoopSpan()
+		if p.telemetry != nil {
+			fetchCtx, fetchSpan = p.telemetry.WithRequestID(ctx, "poller.fetch_events",
+				trace.WithAttributes(
+					attribute.Int(telemetry.AttrStartLedger, int(startLedger)),
+					attribute.Int(telemetry.AttrContractsWatched, len(contracts)),
+				),
+			)
+		}
+		page, err := p.source.FetchEvents(fetchCtx, startLedger, watch, cursor, stellar.DefaultEventsLimit)
 		if err != nil {
+			telemetry.RecordError(fetchSpan, err)
+			fetchSpan.End()
 			return err
 		}
+		fetchSpan.End()
+
 		if page.LatestLedger > 0 && (checkpoint == 0 || page.LatestLedger < checkpoint) {
 			checkpoint = page.LatestLedger
 		}
@@ -380,6 +442,12 @@ func (p *Poller) Poll(ctx context.Context) error {
 	return nil
 }
 
+// handleEvent runs every enabled rule of every monitor watching the
+// event's contract. Events arrive already decoded from the source;
+// per-event failures are logged, not fatal: one bad event must not stall
+// ingestion. Rule evaluation spans come from the registry, one per rule,
+// each a child of the cycle span, on the same trace as the fetch page that
+// produced the event.
 // handleEvent runs every enabled rule of every monitor watching the event's
 // contract. Events arrive already decoded from the source; the shared
 // Ingestor owns evaluation, alert persistence and dispatch.
@@ -388,5 +456,140 @@ func (p *Poller) handleEvent(ctx context.Context, decoded *stellar.DecodedEvent,
 	if !watched {
 		return
 	}
-	p.matched += p.ing.Handle(ctx, decoded, monitors, HandleOptions{Deliver: true}).Matched
+
+	for _, m := range monitors {
+		ruleList, err := p.store.ListRules(ctx, m.ID, true)
+		if err != nil {
+			p.log.Error("list rules", "monitor_id", m.ID, "err", err)
+			continue
+		}
+		for _, rule := range ruleList {
+			// The rule id rides in the context so a stateful evaluator (the
+			// frequency rule) can key its per-rule state.
+			ruleCtx := rules.WithRuleID(ctx, rule.ID)
+			matched, err := p.registry.Evaluate(ruleCtx, rule.Type, decoded, rule.Params)
+			if err != nil {
+				p.log.Warn("rule evaluation failed", "rule_id", rule.ID, "event_id", decoded.ID, "err", err)
+				continue
+			}
+			if matched {
+				p.matched++
+				p.metrics.RecordAlert()
+				// An evaluator may override the dedup key (the frequency rule
+				// stores every crossing in one episode under the window start).
+				eventID := decoded.ID
+				if id := p.registry.AlertEventID(ruleCtx, rule.Type, decoded, rule.Params); id != "" {
+					eventID = id
+				}
+				p.fireAlert(ctx, m, rule, decoded, eventID)
+			}
+		}
+	}
+}
+
+// fireAlert persists a deduped, cooldown-gated alert and hands it to the
+// dispatcher. The store owns both gates so they hold across poller instances
+// and restarts; this function only reports the outcome.
+//
+// The alert runs in its own span (poller.create_alert) under the poll
+// cycle; Dispatch is called with that span's context, so every delivery
+// span becomes a child of this alert's span — never a root. That parent
+// chain is what ties one alert's full path into one timeline, and the
+// poller test pins it.
+func (p *Poller) fireAlert(ctx context.Context, m store.Monitor, rule store.Rule, ev *stellar.DecodedEvent, eventID string) {
+	if p.telemetry != nil {
+		var span trace.Span
+		ctx, span = p.telemetry.WithRequestID(ctx, "poller.create_alert",
+			trace.WithAttributes(
+				attribute.Int64(telemetry.AttrMonitorID, m.ID),
+				attribute.Int64(telemetry.AttrRuleID, rule.ID),
+				attribute.String(telemetry.AttrEventID, eventID),
+			),
+		)
+		defer span.End()
+	}
+
+	body := map[string]any{
+		"contract_id":      ev.ContractID,
+		"event_name":       ev.EventName(),
+		"ledger":           ev.Ledger,
+		"ledger_closed_at": ev.LedgerClosedAt,
+		"tx_hash":          ev.TxHash,
+		"topics":           ev.Topics,
+		"value":            ev.Value,
+	}
+	// Named fields are only present when the contract's spec was available;
+	// without one the payload is byte-for-byte what it has always been.
+	if ev.Fields != nil {
+		body["fields"] = ev.Fields
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		p.log.Error("marshal alert payload", "event_id", ev.ID, "err", err)
+		return
+	}
+
+	alert := &store.Alert{
+		MonitorID:      m.ID,
+		RuleID:         rule.ID,
+		EventID:        eventID,
+		Payload:        payload,
+		Ledger:         ev.Ledger,
+		LedgerClosedAt: ev.LedgerClosedAt,
+		Cooldown:       ruleCooldown(rule),
+		Severity:       rule.Severity,
+	}
+	outcome, err := p.store.CreateAlert(ctx, alert)
+	if err != nil {
+		p.log.Error("create alert", "rule_id", rule.ID, "event_id", ev.ID, "err", err)
+		return
+	}
+	switch outcome {
+	case store.AlertDuplicate:
+		return // dedup: this rule already fired for this event
+	case store.AlertSuppressed:
+		// Counted by the store; logged so an operator can see the rule is
+		// firing far more often than it is alerting.
+		p.log.Info("alert suppressed by cooldown",
+			"rule_id", rule.ID, "event_id", ev.ID, "cooldown", alert.Cooldown)
+		return
+	}
+	logAttrs := []any{"alert_id", alert.ID, "monitor", m.Name, "rule_id", rule.ID, "event_id", ev.ID}
+	if alert.SuppressedSinceLast > 0 {
+		logAttrs = append(logAttrs, "suppressed_since_last", alert.SuppressedSinceLast)
+	}
+	p.log.Info("alert created", logAttrs...)
+
+	// Publish before dispatching: a live dashboard should see the alert the
+	// moment it exists, not after the (possibly retried) channel fan-out.
+	// Only created alerts reach here — duplicates and cooldown-suppressed
+	// matches returned above — so the stream mirrors the alert table exactly.
+	if p.live != nil {
+		p.live.Publish(broadcast.Alert{
+			ID:          alert.ID,
+			MonitorID:   m.ID,
+			MonitorName: m.Name,
+			RuleID:      rule.ID,
+			EventID:     eventID,
+			Payload:     alert.Payload,
+			CreatedAt:   alert.CreatedAt,
+		})
+	}
+
+	p.dispatch.Dispatch(ctx, notify.Alert{
+		ID:          alert.ID,
+		MonitorID:   m.ID,
+		MonitorName: m.Name,
+		RuleID:      rule.ID,
+		RuleType:    rule.Type,
+		EventID:     eventID,
+		ContractID:  ev.ContractID,
+		EventName:   ev.EventName(),
+		Ledger:      ev.Ledger,
+		TxHash:      ev.TxHash,
+		// The store folds the suppressed count into the payload, so the
+		// notification reports it too.
+		Payload:   alert.Payload,
+		CreatedAt: alert.CreatedAt,
+	})
 }
