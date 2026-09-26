@@ -27,8 +27,6 @@ type JSONTemplateConfig struct {
 	BodyTemplate string            `json:"body_template"`
 }
 
-type jsonTemplateConfig = JSONTemplateConfig
-
 // NewJSONTemplate creates a new JSONTemplate notifier from raw JSON config.
 func NewJSONTemplate(config json.RawMessage) (Notifier, error) {
 	var cfg JSONTemplateConfig
