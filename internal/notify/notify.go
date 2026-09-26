@@ -33,6 +33,9 @@ type Alert struct {
 	TxHash      string          `json:"tx_hash"`
 	Payload     json.RawMessage `json:"payload,omitempty"`
 	CreatedAt   time.Time       `json:"created_at"`
+	// Severity is the alert severity (info, warning, critical). Empty means
+	// warning for backwards compatibility.
+	Severity string `json:"severity,omitempty"`
 	// Digest carries a pre-rendered summary when this Alert represents a
 	// channel digest rather than a single event. RenderText returns it
 	// verbatim, so every text channel sends the same summary without
