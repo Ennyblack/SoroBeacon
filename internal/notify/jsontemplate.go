@@ -1,6 +1,7 @@
 package notify
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -17,11 +18,11 @@ type jsonTemplateConfig struct {
 	BodyTemplate string            `json:"body_template"`
 }
 
-// JSONTemplate renders a user-supplied Go text/template against the alert and
+// JSONTemplate renders a user-supplied Go text/template against an alert and
 // sends the result to a configured URL with configured headers.
 type JSONTemplate struct {
 	cfg         jsonTemplateConfig
-	bodyTpl     *template.Template
+	tpl         *template.Template
 	allowedMethods map[string]struct{}
 }
 
@@ -39,13 +40,6 @@ func NewJSONTemplate(config json.RawMessage) (Notifier, error) {
 		return nil, fmt.Errorf("jsontemplate: body_template is required")
 	}
 
-	// Parse the template once at construction time so a malformed template
-	// fails when the channel is created, not on the first alert.
-	bodyTpl, err := template.New("body").Parse(cfg.BodyTemplate)
-	if err != nil {
-		return nil, fmt.Errorf("jsontemplate: invalid body_template: %w", err)
-	}
-
 	method := strings.ToUpper(strings.TrimSpace(cfg.Method))
 	if method == "" {
 		method = http.MethodPost
@@ -57,13 +51,20 @@ func NewJSONTemplate(config json.RawMessage) (Notifier, error) {
 		http.MethodPatch: {},
 	}
 	if _, ok := allowedMethods[method]; !ok {
-		return nil, fmt.Errorf("jsontemplate: method must be one of POST, PUT, PATCH")
+		return nil, fmt.Errorf("jsontemplate: method must be POST, PUT, or PATCH, got %q", cfg.Method)
 	}
 	cfg.Method = method
 
+	// Parse the template once at construction time so a malformed template
+	// fails when the channel is created, not on the first alert.
+	tpl, err := template.New("body_template").Parse(cfg.BodyTemplate)
+	if err != nil {
+		return nil, fmt.Errorf("jsontemplate: invalid body_template: %w", err)
+	}
+
 	return &JSONTemplate{
 		cfg:            cfg,
-		bodyTpl:        bodyTpl,
+		tpl:            tpl,
 		allowedMethods: allowedMethods,
 	}, nil
 }
@@ -71,16 +72,16 @@ func NewJSONTemplate(config json.RawMessage) (Notifier, error) {
 // Send renders the body template with the alert data and sends it to the
 // configured endpoint.
 func (j *JSONTemplate) Send(ctx context.Context, a Alert) error {
-	var body strings.Builder
-	if err := j.bodyTpl.Execute(&body, a); err != nil {
-		return fmt.Errorf("jsontemplate: render body: %w", err)
+	var buf bytes.Buffer
+	if err := j.tpl.Execute(&buf, a); err != nil {
+		return fmt.Errorf("jsontemplate: execute template: %w", err)
 	}
 
 	// Use the shared HTTP client with the configured method and headers.
 	// Header values are secrets: they must never appear in errors, logs, or
 	// delivery response_snippets. The http.requestJSON function already
 	// redacts the URL from errors; we must also avoid logging headers.
-	if err := requestJSON(ctx, j.cfg.Method, j.cfg.URL, []byte(body.String()), j.cfg.Headers); err != nil {
+	if err := requestJSON(ctx, j.cfg.Method, j.cfg.URL, buf.Bytes(), j.cfg.Headers); err != nil {
 		return fmt.Errorf("jsontemplate: %w", err)
 	}
 	return nil
