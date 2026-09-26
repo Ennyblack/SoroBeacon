@@ -937,7 +937,7 @@ func (s *SQLite) CreateAlert(ctx context.Context, a *Alert) (AlertOutcome, error
 
 func (s *SQLite) GetAlert(ctx context.Context, id int64) (*Alert, error) {
 	a, err := scanSQLiteAlert(s.db.QueryRowContext(ctx,
-		`SELECT id, monitor_id, rule_id, event_id, payload, created_at, ledger, retracted_at FROM alerts WHERE id = ?`, id))
+		`SELECT id, monitor_id, rule_id, event_id, payload, created_at, ledger, retracted_at, inhibited_by_rule_id FROM alerts WHERE id = ?`, id))
 	if err != nil {
 		return nil, err
 	}
@@ -945,7 +945,7 @@ func (s *SQLite) GetAlert(ctx context.Context, id int64) (*Alert, error) {
 }
 
 func (s *SQLite) ListAlerts(ctx context.Context, f AlertFilter) ([]Alert, error) {
-	q := `SELECT id, monitor_id, rule_id, event_id, payload, created_at, ledger, retracted_at FROM alerts WHERE 1 = 1`
+	q := `SELECT id, monitor_id, rule_id, event_id, payload, created_at, ledger, retracted_at, inhibited_by_rule_id FROM alerts WHERE 1 = 1`
 	args := []any{}
 	if f.MonitorID != 0 {
 		q += ` AND monitor_id = ?`
@@ -1010,8 +1010,13 @@ func scanSQLiteAlert(r rowScanner) (Alert, error) {
 	var created string
 	var ledger int64
 	var retracted sql.NullString
-	if err := r.Scan(&a.ID, &a.MonitorID, &a.RuleID, &a.EventID, &payload, &created, &ledger, &retracted); err != nil {
+	var inhibited sql.NullInt64
+	if err := r.Scan(&a.ID, &a.MonitorID, &a.RuleID, &a.EventID, &payload, &created, &ledger, &retracted, &inhibited); err != nil {
 		return a, mapSQLiteErr(err)
+	}
+	if inhibited.Valid {
+		v := inhibited.Int64
+		a.InhibitedByRuleID = &v
 	}
 	a.Payload = json.RawMessage(payload)
 	a.Ledger = uint32(ledger)
@@ -1105,7 +1110,7 @@ func (s *SQLite) ExpiredAlerts(ctx context.Context, cutoff time.Time, limit int)
 		limit = DefaultPruneBatch
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, monitor_id, rule_id, event_id, payload, created_at, ledger, retracted_at
+		`SELECT id, monitor_id, rule_id, event_id, payload, created_at, ledger, retracted_at, inhibited_by_rule_id
 		   FROM alerts WHERE created_at < ? ORDER BY created_at ASC, id ASC LIMIT ?`,
 		sqliteTimeString(cutoff), limit)
 	if err != nil {
@@ -1121,6 +1126,106 @@ func (s *SQLite) ExpiredAlerts(ctx context.Context, cutoff time.Time, limit int)
 		out = append(out, a)
 	}
 	return out, rows.Err()
+}
+
+// --- inhibitions ---
+
+func (s *SQLite) CreateInhibition(ctx context.Context, in *Inhibition) error {
+	if in.FiringWindowSeconds <= 0 {
+		in.FiringWindowSeconds = DefaultInhibitionWindowSeconds
+	}
+	var created string
+	err := s.db.QueryRowContext(ctx,
+		`INSERT INTO alert_inhibitions (source_rule_id, target_rule_id, firing_window_seconds)
+		 VALUES (?, ?, ?) RETURNING created_at`,
+		in.SourceRuleID, in.TargetRuleID, in.FiringWindowSeconds,
+	).Scan(&created)
+	if err != nil {
+		return mapSQLiteErr(err)
+	}
+	if in.CreatedAt, err = parseSQLiteTime(created); err != nil {
+		return err
+	}
+	return nil
+}
+
+func scanSQLiteInhibition(r rowScanner) (Inhibition, error) {
+	var in Inhibition
+	var created string
+	if err := r.Scan(&in.SourceRuleID, &in.TargetRuleID, &in.FiringWindowSeconds, &created); err != nil {
+		return in, mapSQLiteErr(err)
+	}
+	var err error
+	in.CreatedAt, err = parseSQLiteTime(created)
+	return in, err
+}
+
+func (s *SQLite) queryInhibitions(ctx context.Context, q string, args ...any) ([]Inhibition, error) {
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []Inhibition
+	for rows.Next() {
+		in, err := scanSQLiteInhibition(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, in)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLite) ListInhibitions(ctx context.Context) ([]Inhibition, error) {
+	return s.queryInhibitions(ctx,
+		`SELECT source_rule_id, target_rule_id, firing_window_seconds, created_at
+		 FROM alert_inhibitions ORDER BY source_rule_id, target_rule_id`)
+}
+
+func (s *SQLite) ListInhibitionsForTarget(ctx context.Context, targetRuleID int64) ([]Inhibition, error) {
+	return s.queryInhibitions(ctx,
+		`SELECT source_rule_id, target_rule_id, firing_window_seconds, created_at
+		 FROM alert_inhibitions WHERE target_rule_id = ? ORDER BY source_rule_id`, targetRuleID)
+}
+
+func (s *SQLite) DeleteInhibition(ctx context.Context, sourceRuleID, targetRuleID int64) error {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM alert_inhibitions WHERE source_rule_id = ? AND target_rule_id = ?`,
+		sourceRuleID, targetRuleID)
+	if err != nil {
+		return mapSQLiteErr(err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *SQLite) RuleFiredWithin(ctx context.Context, ruleID int64, window time.Duration) (bool, error) {
+	// The cutoff is computed in Go so both backends share the decision;
+	// Postgres compares timestamptz, SQLite compares the fixed-format TEXT.
+	cutoff := time.Now().UTC().Truncate(time.Millisecond).Add(-window)
+	var fired int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM alerts WHERE rule_id = ? AND created_at >= ?)`,
+		ruleID, sqliteTimeString(cutoff)).Scan(&fired)
+	if err != nil {
+		return false, mapSQLiteErr(err)
+	}
+	return fired != 0, nil
+}
+
+func (s *SQLite) MarkAlertInhibited(ctx context.Context, alertID, sourceRuleID int64) error {
+	// No row check: the alert may have been pruned between dispatch and
+	// this write, and that must not fail the dispatch path.
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE alerts SET inhibited_by_rule_id = ? WHERE id = ?`, sourceRuleID, alertID)
+	return mapSQLiteErr(err)
 }
 
 // --- ledger hashes and reorg retraction ---

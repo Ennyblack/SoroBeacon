@@ -39,6 +39,13 @@ type DispatchStore interface {
 	// ListChannels is how the digest flusher discovers channels with a
 	// window to close. Dispatch itself only needs ListChannelsForMonitor.
 	ListChannels(ctx context.Context, enabledOnly bool) ([]store.Channel, error)
+	// The inhibition trio backs the delivery-time suppression check
+	// (alerts.InhibitedBy in internal/alerts): the pairs targeting the
+	// alert's rule, whether a source is still firing, and the mark that
+	// records why delivery stopped.
+	ListInhibitionsForTarget(ctx context.Context, targetRuleID int64) ([]store.Inhibition, error)
+	RuleFiredWithin(ctx context.Context, ruleID int64, window time.Duration) (bool, error)
+	MarkAlertInhibited(ctx context.Context, alertID, sourceRuleID int64) error
 }
 
 // Dispatcher fans an alert out to its monitor's channels, retrying each
@@ -124,6 +131,32 @@ func (d *Dispatcher) Dispatch(ctx context.Context, a Alert) {
 		}
 		d.deliver(ctx, a, ch)
 	}
+}
+
+// inhibited answers the delivery-time suppression check for one alert.
+// Failures fail open: an inhibition-store error must not silence real
+// alerts, so anything that cannot be evaluated is delivered. When the
+// alert is suppressed the mark is best-effort — recording why delivery
+// stopped must not turn a suppression into a crash or a retry storm.
+func (d *Dispatcher) inhibited(ctx context.Context, a Alert) bool {
+	inhibitions, err := d.store.ListInhibitionsForTarget(ctx, a.RuleID)
+	if err != nil {
+		d.log.Error("list inhibitions for alert", "alert_id", a.ID, "rule_id", a.RuleID, "err", err)
+		return false
+	}
+	sourceID, suppressed, err := alerts.InhibitedBy(ctx, a.RuleID, inhibitions, d.store.RuleFiredWithin)
+	if err != nil {
+		d.log.Error("evaluate inhibition", "alert_id", a.ID, "rule_id", a.RuleID, "err", err)
+		return false
+	}
+	if !suppressed {
+		return false
+	}
+	if err := d.store.MarkAlertInhibited(ctx, a.ID, sourceID); err != nil {
+		d.log.Error("mark alert inhibited", "alert_id", a.ID, "source_rule_id", sourceID, "err", err)
+	}
+	d.log.Info("delivery inhibited", "alert_id", a.ID, "rule_id", a.RuleID, "source_rule_id", sourceID)
+	return true
 }
 
 // enqueueDigest persists an alert for a channel's next digest flush. The
