@@ -478,6 +478,31 @@
         }
       }
     },
+    "/alerts/stream": {
+      "get": {
+        "summary": "Stream alerts as they are created (Server-Sent Events)",
+        "description": "Opens a text/event-stream response that emits an `alert` event for every alert created after the connection opened. SSE rather than WebSockets: the traffic is one-directional and SSE reconnects on its own. An optional monitor_id filters server-side. Comment lines (keep-alives) are sent periodically so idle connections are not reaped by a proxy, and the stream advertises a 3000ms retry hint. A subscriber that cannot keep up loses its oldest queued events rather than blocking alert creation.",
+        "parameters": [
+          {
+            "name": "monitor_id",
+            "in": "query",
+            "schema": { "type": "integer", "format": "int64" },
+            "description": "Only stream alerts created by this monitor"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Server-Sent Events stream; each `alert` event's data is one alert object",
+            "content": {
+              "text/event-stream": {
+                "schema": { "$ref": "#/components/schemas/Alert" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
     "/alerts.csv": {
       "get": {
         "summary": "Export alerts as CSV",

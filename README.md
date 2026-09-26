@@ -420,6 +420,33 @@ curl -s localhost:8080/api/v1/health
 curl -s localhost:8080/api/v1/stats
 ```
 
+#### Live alerts (Server-Sent Events)
+
+`GET /api/v1/alerts/stream` streams alerts as they are created, so the
+dashboard and any API consumer can react without polling `/api/v1/alerts` on
+a timer. SSE rather than WebSockets: the traffic is one-directional, and SSE
+survives proxies (and reconnects on its own) with far less configuration.
+
+```sh
+curl -N localhost:8080/api/v1/alerts/stream             # every alert
+curl -N 'localhost:8080/api/v1/alerts/stream?monitor_id=1'
+```
+
+Each alert arrives as an `alert` event whose `data` is one JSON object: the
+stored alert's fields plus the monitor's `name`.
+
+```
+event: alert
+data: {"id":7,"monitor_id":1,"monitor_name":"My token","rule_id":3,"event_id":"0000…","payload":{"contract_id":"C…","event_name":"transfer"},"created_at":"2026-09-24T12:00:00Z"}
+```
+
+`monitor_id` filters server-side. Comment lines (`: keep-alive`) are sent
+every 15s so an idle connection is not reaped by a proxy. A slow or dead
+client never blocks alert creation: each subscriber has a buffered queue and,
+when it fills, the oldest pending event is dropped — the loss is counted by
+`sorobeacon_alerts_stream_dropped_total` on `/metrics`. The alerts page in the
+dashboard subscribes to this endpoint and appends new alerts live.
+
 ## CLI
 
 The same binary doubles as a CLI for a running instance, so bootstrapping a
