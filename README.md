@@ -326,6 +326,28 @@ curl -s -X POST localhost:8080/api/v1/monitors/1/rules -d '{
 }'
 ```
 
+**`topic_position`** — match when the decoded topic at a fixed position
+exactly equals a configured value. Custom (non-SEP-41) contracts put
+meaningful values in fixed topic positions — a pool ID, a market symbol, an
+account — and this is the direct "position N equals V" question that
+`event_emitted` (first topic only) and `token_event` (SEP-41 slots only)
+cannot ask. Comparison is exact string equality against the topic's decoded
+string form; a position beyond the event's topic count is a non-match, not
+an error:
+
+```sh
+curl -s -X POST localhost:8080/api/v1/monitors/1/rules -d '{
+  "type": "topic_position",
+  "params": {
+    "position": 2,
+    "equals": "POOL_USDC_XLM",
+    "event": "deposit"
+  }
+}'
+```
+
+See [docs/rules/topic-position.md](docs/rules/topic-position.md).
+
 Every rule type also accepts an optional `cooldown` (a Go duration string such
 as `"5m"`): the first match alerts, further matches in the window are counted
 and dropped, and the next alert reports `suppressed_since_last`. It survives a
