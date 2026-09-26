@@ -156,6 +156,7 @@ func (in *Ingestor) fireAlert(ctx context.Context, m store.Monitor, rule store.R
 		LedgerClosedAt: ev.LedgerClosedAt,
 		Cooldown:       ruleCooldown(rule),
 		Backfilled:     opts.Backfilled,
+		Severity:       rule.Severity,
 	}
 	outcome, err := in.store.CreateAlert(ctx, alert)
 	if err != nil {
@@ -215,10 +216,9 @@ func (in *Ingestor) fireAlert(ctx context.Context, m store.Monitor, rule store.R
 		EventName:   ev.EventName(),
 		Ledger:      ev.Ledger,
 		TxHash:      ev.TxHash,
-		// The store folds the suppressed count into the payload, so the
-		// notification reports it too.
-		Payload:   alert.Payload,
-		CreatedAt: alert.CreatedAt,
+		Payload:     alert.Payload,
+		CreatedAt:   alert.CreatedAt,
+		Severity:    string(alert.Severity),
 	})
 	return true, true
 }
