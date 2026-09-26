@@ -297,8 +297,8 @@ and never returned in responses. Each has a page under
 [docs/channels/](docs/channels/):
 [Discord](docs/channels/discord.md), [Slack](docs/channels/slack.md),
 [Telegram](docs/channels/telegram.md), [Matrix](docs/channels/matrix.md),
-[PagerDuty](docs/channels/pagerduty.md), [Email](docs/channels/email.md) and
-the [generic webhook](docs/channels/webhook.md).
+[PagerDuty](docs/channels/pagerduty.md), [Email](docs/channels/email.md),
+[Signal](docs/channels/signal.md) and the [generic webhook](docs/channels/webhook.md).
 
 ```sh
 # Discord
@@ -470,4 +470,4 @@ Decoded events use a small value vocabulary (`nil`, `bool`, `string`,
 ## License
 ### Notification Channels
 
-Supported channels include [Discord](docs/channels/discord.md), [Slack](docs/channels/slack.md), [Telegram](docs/channels/telegram.md), [Matrix](docs/channels/matrix.md), [PagerDuty](docs/channels/pagerduty.md), [Twilio SMS](docs/channels/twilio.md), [Email](docs/channels/email.md), and generic [Webhooks](docs/channels/webhook.md).
+Supported channels include [Discord](docs/channels/discord.md), [Slack](docs/channels/slack.md), [Telegram](docs/channels/telegram.md), [Matrix](docs/channels/matrix.md), [PagerDuty](docs/channels/pagerduty.md), [Twilio SMS](docs/channels/twilio.md), [Email](docs/channels/email.md), [Signal](docs/channels/signal.md), and generic [Webhooks](docs/channels/webhook.md).
