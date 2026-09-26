@@ -1,4 +1,4 @@
--- SQLite equivalent of the Postgres 0012_audit_log. JSONB becomes TEXT and
+-- SQLite equivalent of the Postgres 0013_audit_log. JSONB becomes TEXT and
 -- the timestamp uses the same fixed strftime format as the other tables so it
 -- compares chronologically as text. diff holds field names only, never
 -- values.

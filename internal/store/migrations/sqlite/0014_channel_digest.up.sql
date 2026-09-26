@@ -1,4 +1,4 @@
--- SQLite equivalent of the Postgres 0013_channel_digest. JSONB becomes TEXT
+-- SQLite equivalent of the Postgres 0014_channel_digest. JSONB becomes TEXT
 -- and timestamps use the fixed strftime format; the foreign key cascades so
 -- pending rows follow their channel, exactly as on Postgres.
 ALTER TABLE channels ADD COLUMN digest_mode TEXT NOT NULL DEFAULT '';

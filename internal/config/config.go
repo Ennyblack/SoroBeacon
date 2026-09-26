@@ -42,10 +42,15 @@ type Config struct {
 	// and RPC endpoint, resolved from NETWORK / RPC_URL /
 	// NETWORK_PASSPHRASE by ParseNetwork.
 	Network Network
-	// RPCURL is the Stellar RPC endpoint (JSON-RPC 2.0 over HTTP). This is
-	// Network.RPCURL; kept as a direct field since most call sites only
-	// need the URL.
+	// RPCURL is the first Stellar RPC endpoint (JSON-RPC 2.0 over HTTP).
+	// This is Network.RPCURL; kept as a direct field since most call sites
+	// only need the URL.
 	RPCURL string
+	// RPCURLs is the ordered list of Stellar RPC endpoints to poll, with
+	// failover in that order (RPC_URLS). It is always non-empty: RPC_URLS
+	// takes priority when set, and RPC_URL alone is the single-entry case,
+	// so a deployment that never sets RPC_URLS behaves exactly as before.
+	RPCURLs []string
 	// DatabaseURL is a Postgres connection string (pgx format).
 	DatabaseURL string
 	// DatabaseMaxConns is the pgx pool MaxConns. Zero means use the
@@ -114,6 +119,10 @@ type Config struct {
 	// MonitorSilentAfter is how long since last_matched_at before the
 	// dashboard marks a monitor silent. Default 24h.
 	MonitorSilentAfter time.Duration
+	// GRPCAddr is the listen address for the optional gRPC server
+	// (GRPC_ADDR). Empty (the default) disables gRPC entirely so existing
+	// deployments do not open a new port without opting in.
+	GRPCAddr string
 	// ReorgTrackingWindow is how many recent ledgers' hashes the poller keeps
 	// and re-checks each cycle for reorg detection
 	// (REORG_TRACKING_WINDOW, default 128). Zero disables detection, which is
@@ -160,6 +169,7 @@ func Load() (Config, error) {
 	cfg := Config{
 		Network:            net,
 		RPCURL:             net.RPCURL,
+		RPCURLs:            net.RPCURLs,
 		DatabaseURL:        os.Getenv("DATABASE_URL"),
 		PollInterval:       DefaultPollInterval,
 		HTTPAddr:           getenv("HTTP_ADDR", DefaultHTTPAddr),
@@ -186,10 +196,10 @@ func Load() (Config, error) {
 
 	// An absolute http(s) RPC URL is required whenever one is in play —
 	// always in rpc mode, and in sorotrail mode whenever RPC_URL is set
-	// alongside the indexer URL.
-	rpcURL, err := url.Parse(cfg.RPCURL)
-	if cfg.RPCURL != "" && (err != nil || !rpcURL.IsAbs() || rpcURL.Host == "" ||
-		(rpcURL.Scheme != "http" && rpcURL.Scheme != "https")) {
+	// alongside the indexer URL. cfg.RPCURL is RPC_URLS[0] when the list is
+	// set, so this covers both spellings; ParseRPCURLs validates the rest of
+	// the list (and each entry's own message names it).
+	if cfg.RPCURL != "" && !validRPCURL(cfg.RPCURL) {
 		return cfg, fmt.Errorf(
 			"invalid RPC_URL %q: must be an absolute http or https URL",
 			cfg.RPCURL,
@@ -325,6 +335,13 @@ func Load() (Config, error) {
 		return cfg, err
 	}
 	cfg.ConfigEncryptionKey = key
+	cfg.GRPCAddr = os.Getenv("GRPC_ADDR")
+	if cfg.GRPCAddr != "" {
+		if err := validateHTTPAddr(cfg.GRPCAddr); err != nil {
+			return cfg, fmt.Errorf("invalid GRPC_ADDR: %w", err)
+		}
+	}
+
 	if v := os.Getenv("ALERT_RETENTION"); v != "" {
 		d, err := ParseRetention(v)
 		if err != nil {
@@ -420,6 +437,10 @@ func (c Config) LogAttrs() []slog.Attr {
 		slog.String("log_level", strings.ToLower(c.LogLevel.String())),
 		slog.String("network", c.Network.Name),
 		slog.String("rpc_url", c.RPCURL),
+		// The count, not the list: it is how an operator confirms at a
+		// glance that the failover set was read, and the URLs themselves
+		// already appear (first one above) in the poller's own lines.
+		slog.Int("rpc_endpoint_count", len(c.RPCURLs)),
 		slog.String("sorotrail_url", c.SoroTrailURL),
 		slog.String("cors_allowed_origins", strings.Join(c.CORSAllowedOrigins, ",")),
 		slog.Bool("config_encryption_enabled", len(c.ConfigEncryptionKey) > 0),

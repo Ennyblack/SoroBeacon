@@ -163,6 +163,7 @@ func (s *Server) Routes() chi.Router {
 	})
 
 	r.Post("/monitors/import", s.importContracts)
+	r.Post("/ingest", s.ingest)
 
 	r.Get("/alerts", s.listAlerts)
 	r.Get("/alerts.csv", s.exportAlertsCSV)
@@ -171,6 +172,7 @@ func (s *Server) Routes() chi.Router {
 	r.Get("/health", s.health)
 	r.Get("/livez", s.livez)
 	r.Get("/readyz", s.readyz)
+	r.Get("/poller", s.pollerStatus)
 	r.Get("/version", s.version)
 	r.Get("/stats", s.stats)
 	r.Get("/stats/alerts-daily", s.alertsDaily)
