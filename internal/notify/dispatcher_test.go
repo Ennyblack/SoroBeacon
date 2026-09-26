@@ -54,23 +54,8 @@ func (f *fakeDispatchStore) RecordDeliveryAttempt(_ context.Context, d *store.De
 	return nil
 }
 
-func (f *fakeDispatchStore) ListInhibitionsForTarget(_ context.Context, target int64) ([]store.Inhibition, error) {
-	var out []store.Inhibition
-	for _, in := range f.inhibitions {
-		if in.TargetRuleID == target {
-			out = append(out, in)
-		}
-	}
-	return out, nil
-}
-
-func (f *fakeDispatchStore) RuleFiredWithin(_ context.Context, ruleID int64, _ time.Duration) (bool, error) {
-	return f.firing[ruleID], nil
-}
-
-func (f *fakeDispatchStore) MarkAlertInhibited(_ context.Context, alertID, sourceID int64) error {
-	f.inhibited = append(f.inhibited, inhibitedMark{alertID: alertID, sourceID: sourceID})
-	return nil
+func (f *fakeDispatchStore) ListChannels(_ context.Context, _ bool) ([]store.Channel, error) {
+	return f.channels, nil
 }
 
 func newTestDispatcher(t *testing.T, st *fakeDispatchStore, n Notifier) *Dispatcher {

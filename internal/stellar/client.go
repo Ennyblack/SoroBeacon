@@ -35,6 +35,25 @@ func (e *RPCError) Error() string {
 	return fmt.Sprintf("rpc error %d: %s", e.Code, e.Message)
 }
 
+// HTTPStatusError is a non-200 HTTP answer from an RPC endpoint. It is typed
+// rather than a plain string error so the failover client can tell the
+// endpoint's own failures (429, 5xx — worth trying elsewhere) from a
+// legitimate 4xx result, which every endpoint would answer the same way and
+// which therefore must not mark any of them unhealthy.
+//
+// Body is the truncated response body; RPC endpoints do not echo credentials,
+// and the client already limits it to keep a proxy's HTML error page from
+// filling the log line.
+type HTTPStatusError struct {
+	Method     string
+	StatusCode int
+	Body       string
+}
+
+func (e *HTTPStatusError) Error() string {
+	return fmt.Sprintf("%s: unexpected status %d: %s", e.Method, e.StatusCode, e.Body)
+}
+
 // HTTPClient implements Client against a JSON-RPC 2.0 endpoint such as
 // https://soroban-testnet.stellar.org.
 type HTTPClient struct {
@@ -184,7 +203,7 @@ func (c *HTTPClient) call(ctx context.Context, method string, params, result any
 		return fmt.Errorf("%s: read response: %w", method, err)
 	}
 	if httpRes.StatusCode != http.StatusOK {
-		return fmt.Errorf("%s: unexpected status %d: %s", method, httpRes.StatusCode, truncate(string(raw), 200))
+		return &HTTPStatusError{Method: method, StatusCode: httpRes.StatusCode, Body: truncate(string(raw), 200)}
 	}
 
 	var envelope struct {

@@ -17,6 +17,7 @@ func TestLoadDefaults(t *testing.T) {
 	// environment cannot masquerade as the unset path.
 	t.Setenv("DATABASE_URL", "postgres://x")
 	t.Setenv("RPC_URL", "")
+	t.Setenv("RPC_URLS", "")
 	t.Setenv("NETWORK", "")
 	t.Setenv("NETWORK_PASSPHRASE", "")
 	t.Setenv("POLL_INTERVAL", "")
@@ -136,13 +137,56 @@ func TestLoadAcceptsHTTPAndHTTPSRPCURLs(t *testing.T) {
 		t.Run(rpcURL, func(t *testing.T) {
 			t.Setenv("DATABASE_URL", "postgres://x")
 			t.Setenv("RPC_URL", rpcURL)
+			t.Setenv("RPC_URLS", "")
 
 			cfg, err := Load()
 
 			require.NoError(t, err)
 			assert.Equal(t, rpcURL, cfg.RPCURL)
+			// A lone RPC_URL is the single-entry case of the same list, so
+			// downstream code always has a failover set to work with.
+			assert.Equal(t, []string{rpcURL}, cfg.RPCURLs)
 		})
 	}
+}
+
+func TestLoadRPCURLs(t *testing.T) {
+	t.Run("RPC_URLS takes priority over RPC_URL", func(t *testing.T) {
+		t.Setenv("DATABASE_URL", "postgres://x")
+		t.Setenv("RPC_URL", "https://ignored.example")
+		t.Setenv("RPC_URLS", "https://primary.example, https://fallback.example")
+
+		cfg, err := Load()
+
+		require.NoError(t, err)
+		assert.Equal(t, "https://primary.example", cfg.RPCURL)
+		assert.Equal(t, []string{"https://primary.example", "https://fallback.example"}, cfg.RPCURLs)
+	})
+
+	t.Run("RPC_URLS alone satisfies a custom network", func(t *testing.T) {
+		t.Setenv("DATABASE_URL", "postgres://x")
+		t.Setenv("NETWORK", "custom")
+		t.Setenv("NETWORK_PASSPHRASE", "Standalone Network ; September 2026")
+		t.Setenv("RPC_URL", "")
+		t.Setenv("RPC_URLS", "https://only.example")
+
+		cfg, err := Load()
+
+		require.NoError(t, err)
+		assert.Equal(t, []string{"https://only.example"}, cfg.RPCURLs)
+	})
+
+	t.Run("an invalid entry fails at load", func(t *testing.T) {
+		t.Setenv("DATABASE_URL", "postgres://x")
+		t.Setenv("RPC_URL", "")
+		t.Setenv("RPC_URLS", "https://primary.example,not-a-url")
+
+		_, err := Load()
+
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "RPC_URLS")
+		assert.ErrorContains(t, err, "not-a-url")
+	})
 }
 
 func TestLoadRejectsInvalidRPCURL(t *testing.T) {
@@ -172,6 +216,7 @@ func TestLoadRejectsInvalidRPCURL(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("DATABASE_URL", "postgres://x")
 			t.Setenv("RPC_URL", tt.rpcURL)
+			t.Setenv("RPC_URLS", "")
 
 			_, err := Load()
 
@@ -411,9 +456,13 @@ func TestLogAttrsOptInDoesNotDumpWholeStruct(t *testing.T) {
 		"log_level",
 		"network",
 		"rpc_url",
+		"rpc_endpoint_count",
 		"sorotrail_url",
 		"cors_allowed_origins",
 		"config_encryption_enabled",
+		"secrets_provider",
+		"secrets_cache_ttl",
+		"vault_token_configured",
 		"reorg_tracking_window",
 		"reorg_confirmation_depth",
 		"api_token_count",
@@ -737,5 +786,57 @@ func TestLoadRejectsInvalidDatabaseURL(t *testing.T) {
 				assert.ErrorContains(t, err, s)
 			}
 		})
+	}
+}
+
+func TestLoadSecretsProvider(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://x")
+
+	// Disabled by default: references stay literals.
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Empty(t, cfg.SecretsProvider)
+
+	t.Setenv("SECRETS_PROVIDER", "env")
+	t.Setenv("SECRETS_CACHE_TTL", "90s")
+	cfg, err = Load()
+	require.NoError(t, err)
+	assert.Equal(t, "env", cfg.SecretsProvider)
+	assert.Equal(t, 90*time.Second, cfg.SecretsCacheTTL)
+
+	// A disabled cache is allowed.
+	t.Setenv("SECRETS_CACHE_TTL", "0s")
+	cfg, err = Load()
+	require.NoError(t, err)
+	assert.Zero(t, cfg.SecretsCacheTTL)
+}
+
+func TestLoadRejectsBadSecretsConfig(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://x")
+
+	t.Setenv("SECRETS_PROVIDER", "aws")
+	_, err := Load()
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "SECRETS_PROVIDER")
+
+	t.Setenv("SECRETS_PROVIDER", "")
+	t.Setenv("SECRETS_CACHE_TTL", "-1s")
+	_, err = Load()
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "SECRETS_CACHE_TTL")
+
+	t.Setenv("SECRETS_CACHE_TTL", "")
+	t.Setenv("SECRETS_PROVIDER", "vault")
+	_, err = Load()
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "VAULT_ADDR")
+
+	// The token is a credential and must never reach LogAttrs.
+	t.Setenv("VAULT_ADDR", "https://vault.example:8200")
+	t.Setenv("VAULT_TOKEN", "hvs.super-secret")
+	cfg, err := Load()
+	require.NoError(t, err)
+	for _, a := range cfg.LogAttrs() {
+		assert.NotEqual(t, "hvs.super-secret", a.Value.String())
 	}
 }

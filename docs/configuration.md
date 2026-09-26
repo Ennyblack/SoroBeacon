@@ -22,7 +22,8 @@ and this page should be updated.
 | `CONFIG_ENCRYPTION_KEY` | **yes** | Base64 AES-GCM key that encrypts channel `config` at rest. Losing it makes encrypted configs unrecoverable — back it up with the database. |
 | `API_TOKEN` | **yes** | Bearer token(s) for `/api/v1` and the dashboard sign-in. Anyone holding one can read and mutate everything, so treat it like a password: mode `0600` on disk, a secret manager in production, and never in a log line, ticket or shell history. |
 | `NETWORK_PASSPHRASE` | no (public nets) | SDF passphrases are public. For `NETWORK=custom` it identifies a private network — treat it as operational config, not a credential. |
-| `RPC_URL` / `SOROTRAIL_URL` | maybe | A URL is not a password, but provider URLs sometimes embed tokens in the path or query. Do not commit those. |
+| `VAULT_TOKEN` | **yes** | Credential for the Vault secret provider. Never logged; a resolved secret is never returned by the API. |
+| `RPC_URL` / `RPC_URLS` / `SOROTRAIL_URL` | maybe | A URL is not a password, but provider URLs sometimes embed tokens in the path or query. Do not commit those. |
 | `CORS_ALLOWED_ORIGINS` | no | An allow-list, not a credential. Think hard before allowing a third-party origin: whatever credential that origin's users hold can act through their browser. |
 | everything else | no | |
 
@@ -114,6 +115,23 @@ write. Losing the key makes encrypted rows undecryptable: reads fail with an
 error naming the channel and never echo ciphertext or key material. Back the
 key up alongside your database backups.
 
+## External secrets
+
+A channel config value can reference a secret held outside SoroBeacon — in
+Vault or the process environment — instead of storing the value in the
+database. The value is resolved when a notifier is constructed and is never
+written back, logged or returned by the API. See
+[External secrets in channel config](channels/secrets.md) for the reference
+syntax and providers.
+
+| Variable | Type | Default | Required | What it does |
+| --- | --- | --- | --- | --- |
+| `SECRETS_PROVIDER` | string | empty (disabled) | optional | `env` or `vault`; selects the provider that resolves `${secret:...}` references. Unset treats references as literals, so an upgrade changes nothing. |
+| `SECRETS_CACHE_TTL` | duration | `5m` | optional | How long a resolved secret is reused so every alert does not hit the provider. `0s` disables caching. The cache is dropped whenever a channel is created, updated or deleted. |
+| `VAULT_ADDR` | URL string | _(none)_ | required when `SECRETS_PROVIDER=vault` | Vault base URL, e.g. `https://vault.example:8200`. |
+| `VAULT_TOKEN` | secret string | _(none)_ | optional | Vault token sent as `X-Vault-Token`. Never logged. |
+| `VAULT_NAMESPACE` | string | empty | optional | Vault Enterprise namespace sent as `X-Vault-Namespace`. |
+
 ## RPC / event source
 
 These select **where events come from** and **which Stellar network**
@@ -126,10 +144,49 @@ which network it is on and **refuses to start on a mismatch**.
 | `SOROTRAIL_URL` | URL string | _(none)_ | **required when `SOURCE_MODE=sorotrail`**; ignored in `rpc` mode | Base URL of the SoroTrail indexer. Load fails if this is empty in sorotrail mode. |
 | `NETWORK` | enum | `testnet` | optional | `testnet` \| `mainnet` \| `futurenet` \| `custom`. Selects the preset RPC endpoint and passphrase. |
 | `RPC_URL` | URL string | per `NETWORK` (testnet: `https://soroban-testnet.stellar.org`) | required when `NETWORK=custom`; optional override otherwise | Stellar RPC endpoint (JSON-RPC 2.0 over HTTP/HTTPS). Must be an absolute `http` or `https` URL when set. |
+| `RPC_URLS` | comma-separated URL list | _(none — `RPC_URL` is used)_ | optional | Ordered RPC endpoints to fail over between, highest priority first. **Takes priority over `RPC_URL` when set**, so you never need both; entries are trimmed, so `a, b` and `a,b` are the same list. Every entry must be an absolute `http` or `https` URL, and one endpoint that names no URL at all (`RPC_URLS=,,`) is a startup error rather than a silent fallback. |
 | `NETWORK_PASSPHRASE` | string | per `NETWORK` | **required when `NETWORK=custom`**; optional override otherwise | Network passphrase. Always wins over the preset, so a named network with a local quickstart passphrase works. |
 
-`NETWORK=custom` is for private standalone networks: both `RPC_URL` and
-`NETWORK_PASSPHRASE` must be set.
+`NETWORK=custom` is for private standalone networks: both an RPC endpoint
+(`RPC_URL` or `RPC_URLS`) and `NETWORK_PASSPHRASE` must be set.
+
+### Failing over between endpoints
+
+A public Soroban RPC endpoint rate-limits and goes down, and a monitoring tool
+that stops seeing events is the one failure mode it cannot have. With
+`RPC_URLS` set, every call goes to the first endpoint in the list that is not
+quarantined.
+
+This is the only supported way to keep a paid endpoint with a public
+fallback — one list, in priority order:
+
+```sh
+RPC_URLS=https://my-paid-rpc.example,https://soroban-testnet.stellar.org
+```
+
+A transport error, a `429` or a `5xx` answer means that endpoint is at fault,
+so it is quarantined for an exponentially growing backoff (5s, 10s, 20s …
+capped at 5m) and the same call is immediately retried on the next endpoint.
+Once the backoff expires the endpoint rejoins the rotation, and a successful
+probe clears its failure count. A `4xx` answer or a JSON-RPC error object does
+**not** trigger failover: the node understood the request and rejected it, so
+the next endpoint would reject it identically, and counting it against an
+endpoint would quarantine a node that is fine. While at least one endpoint is
+in rotation the poller never notices any of this.
+
+Every endpoint is checked at startup and SoroBeacon **refuses to start** if one
+of them reports a different network passphrase than the configured one. That
+check exists because failover spreads calls across the whole list: a set that
+mixed mainnet and testnet would feed a mixture of two chains' events into the
+alert stream, intermittently, which is far harder to spot than a hard failure.
+An endpoint that is unreachable at startup is logged and skipped instead —
+that is what failover is for.
+
+Quarantine and recovery are logged (`rpc endpoint quarantined`,
+`rpc endpoint recovered`) with the endpoint URL, the failure count and the
+backoff, and the same per-endpoint failure counts are exposed by
+`stellar.FailoverClient.Stats()` for the metrics work tracked in
+[#26](https://github.com/sorotrail/SoroBeacon/issues/26).
 
 ## HTTP
 
