@@ -267,6 +267,7 @@ func (d *Dispatcher) deliver(ctx context.Context, a Alert, ch store.Channel) {
 			),
 		)
 		defer span.End()
+	}
 	if d.rateLimiter != nil {
 		if err := d.rateLimiter.Wait(ctx, ch.ID, ch.Type, 0); err != nil {
 			if d.metrics != nil {

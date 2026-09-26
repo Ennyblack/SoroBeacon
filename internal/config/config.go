@@ -208,19 +208,19 @@ func Load() (Config, error) {
 	}
 
 	cfg := Config{
-		Network:                    net,
-		RPCURL:                     net.RPCURL,
-		RPCURLs:                    net.RPCURLs,
-		DatabaseURL:                os.Getenv("DATABASE_URL"),
-		PollInterval:               DefaultPollInterval,
-		HTTPAddr:                   getenv("HTTP_ADDR", DefaultHTTPAddr),
-		HTTPMaxBodyBytes:           DefaultHTTPMaxBodyBytes,
-		LogLevel:                   slog.LevelInfo,
-		MonitorSilentAfter:         DefaultMonitorSilentAfter,
-		NotifyRateLimitSlackRPS:    1.0,  // Slack webhooks / tier 2 rate limit ~1 rps
-		NotifyRateLimitTelegramRPS: 30.0, // Telegram Bot API limit ~30 rps
-		NotifyRateLimitPagerDutyRPS: 2.0, // PagerDuty Events API v2 rate limit ~2 rps
-		NotifyRateLimitDefaultRPS:  5.0,  // General default rps
+		Network:                     net,
+		RPCURL:                      net.RPCURL,
+		RPCURLs:                     net.RPCURLs,
+		DatabaseURL:                 os.Getenv("DATABASE_URL"),
+		PollInterval:                DefaultPollInterval,
+		HTTPAddr:                    getenv("HTTP_ADDR", DefaultHTTPAddr),
+		HTTPMaxBodyBytes:            DefaultHTTPMaxBodyBytes,
+		LogLevel:                    slog.LevelInfo,
+		MonitorSilentAfter:          DefaultMonitorSilentAfter,
+		NotifyRateLimitSlackRPS:     1.0,  // Slack webhooks / tier 2 rate limit ~1 rps
+		NotifyRateLimitTelegramRPS:  30.0, // Telegram Bot API limit ~30 rps
+		NotifyRateLimitPagerDutyRPS: 2.0,  // PagerDuty Events API v2 rate limit ~2 rps
+		NotifyRateLimitDefaultRPS:   5.0,  // General default rps
 		// Detection is on by default; confirmation depth off, so a monitor
 		// alerts exactly as soon as it did before this feature.
 		ReorgTrackingWindow:    DefaultReorgTrackingWindow,
@@ -430,6 +430,7 @@ func Load() (Config, error) {
 			return cfg, fmt.Errorf("invalid OTLP_SAMPLE_RATE %q (want a number in [0, 1])", v)
 		}
 		cfg.OTLP.SampleRate = r
+	}
 	if v := os.Getenv("NOTIFY_RATE_LIMIT_SLACK_RPS"); v != "" {
 		rps, err := strconv.ParseFloat(v, 64)
 		if err != nil || rps < 0 || math.IsNaN(rps) || math.IsInf(rps, 0) {

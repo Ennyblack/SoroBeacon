@@ -118,6 +118,18 @@ func (f *fakeStore) RecordDeliveryAttempt(_ context.Context, d *store.DeliveryAt
 	return nil
 }
 
+// ListChannels satisfies the digest half of the dispatcher's store
+// interface; the poller tests never exercise digest flushing.
+func (f *fakeStore) ListChannels(_ context.Context, enabledOnly bool) ([]store.Channel, error) {
+	var out []store.Channel
+	for _, ch := range f.channels {
+		if !enabledOnly || ch.Enabled {
+			out = append(out, ch)
+		}
+	}
+	return out, nil
+}
+
 func (f *fakeStore) ListMonitors(_ context.Context, enabledOnly bool) ([]store.Monitor, error) {
 	var out []store.Monitor
 	for _, m := range f.monitors {
