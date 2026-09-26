@@ -15,6 +15,7 @@ explains what actually happens, straight from the code.
 | "Did a number in the event's data cross a threshold?" | [`value_threshold`](../rules/value-threshold.md) |
 | "Did a SEP-41 token do something (transfer/mint/burn/…, optionally to/from/amount)?" | [`token_event`](../rules/token-event.md) |
 | "Is it happening *too often*?" | [`frequency_threshold`](../rules/frequency-threshold.md) |
+| "Did any event in a *family* happen (a pattern, not one exact name)?" | [`topic_regex`](../rules/topic-regex.md) |
 
 More precisely:
 
@@ -41,6 +42,12 @@ More precisely:
   event. It fires once per crossing, stays quiet one full window, and
   rebuilds its window from the alerts table after a restart — see its
   [reference page](../rules/frequency-threshold.md) for the re-arm details.
+* **`topic_regex` is for event families** and unknown topic conventions:
+  when a DEX emits `swap_exact_in`, `swap_exact_out`, `pool_deposit`, …, one
+  `^swap_`-style pattern covers the family instead of one `event_emitted`
+  rule per name. Patterns are unanchored RE2 matched against a topic's
+  string value; non-string topics never match. See its
+  [reference page](../rules/topic-regex.md).
 
 Any rule type can carry a `cooldown` — see [rule cooldown](../rules/cooldown.md).
 
@@ -198,4 +205,5 @@ here is the second user topic. Verified: `201`.
 * [`value_threshold`](../rules/value-threshold.md)
 * [`token_event`](../rules/token-event.md)
 * [`frequency_threshold`](../rules/frequency-threshold.md)
+* [`topic_regex`](../rules/topic-regex.md)
 * [`cooldown` (cross-cutting)](../rules/cooldown.md)
