@@ -154,6 +154,36 @@ per-dependency detail). `/api/v1/version` reports the version, commit and
 build date baked in at compile time. Every response carries an
 `X-Request-ID` correlation header, echoed in error bodies and log lines.
 
+**Distributed tracing** answers the per-alert question metrics cannot: when
+an alert was late, which stage was slow? With `OTLP_ENDPOINT` set, one
+OTLP/HTTP trace per poll cycle spans the whole path — `poller.poll` →
+`poller.fetch_events` (RPC fetch + decode) → `rules.evaluate` →
+`poller.create_alert` → `store.create_alert` → `notify.deliver` per
+channel — with each delivery a child of its alert's span, never a root.
+Every span carries the ambient `X-Request-ID` as a `request_id` attribute,
+so a log line and its trace can be joined. Tracing is **off by default**
+(no endpoint, no exporter, no overhead); `OTLP_SAMPLE_RATE` scales it down
+on busy deployments. Span attributes never contain channel config, tokens
+or webhook URLs — channels are identified by row id only.
+
+Try it locally with the collector of your choice; for example
+[Jaeger](https://www.jaegertracing.io/docs/latest/getting-started/) all-in-one
+exposes an OTLP/HTTP endpoint on port 4318:
+
+```sh
+# Run a local collector (Jaeger all-in-one; OTLP/HTTP on :4318,
+# UI on :16686)
+docker run --rm -p 16686:16686 -p 4318:4318 jaegertracing/all-in-one:latest
+
+# Point SoroBeacon at it
+cp .env.example .env   # edit DATABASE_URL as usual
+OTLP_ENDPOINT=http://localhost:4318 ./bin/sorobeacon
+
+# After a matching event lands, open http://localhost:16686 and search
+# for service "sorobeacon"; one poll cycle is one trace from the RPC
+# fetch to every channel delivery.
+```
+
 Channel secrets (webhook URLs, bot tokens, SMTP credentials) live in each
 channel's `config` JSON in the database. They are never logged and never
 returned by the API. Set `CONFIG_ENCRYPTION_KEY` to encrypt them at rest;
@@ -453,6 +483,7 @@ Layout:
 cmd/sorobeacon      wiring + graceful shutdown, CLI subcommands (cli*.go)
 cmd/sorobeacon      wiring + graceful shutdown
 internal/config     env config
+internal/telemetry  OpenTelemetry tracer setup (OTLP/HTTP; off by default)
 internal/stellar    RPC client (getEvents/getLatestLedger/getHealth) + ScVal decoder
 internal/store      Postgres (pgx) + embedded golang-migrate migrations
 internal/rules      RuleEvaluator interface + event_emitted, value_threshold,

@@ -66,13 +66,18 @@ func (f *fakeRPC) GetHealth(context.Context) (*stellar.Health, error) {
 
 // fakeStore implements poller.Store in memory, including the rule cooldown
 // semantics the real store enforces in SQL. now is injectable so tests can
-// advance the cooldown window without sleeping.
+// advance the cooldown window without sleeping. The channel fields are
+// only used by the tracing tests, which run deliveries through a real
+// notify.Dispatcher; the plain poller tests never touch them.
 type fakeStore struct {
 	monitors []store.Monitor
 	rules    map[int64][]store.Rule // monitor id -> rules
 	state    store.IngestState
 	alerts   []store.Alert
 	dedup    map[string]bool // "ruleID/eventID"
+	channels []store.Channel
+	attached map[int64][]int64 // monitor id -> channel ids
+	attempts []store.DeliveryAttempt
 
 	now        func() time.Time
 	lastFired  map[int64]time.Time // rule id -> last alert time
@@ -83,13 +88,46 @@ type fakeStore struct {
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		ledgerHashes: map[uint32]string{},
 		rules:        map[int64][]store.Rule{},
 		dedup:        map[string]bool{},
+		attached:     map[int64][]int64{},
 		now:          time.Now,
 		lastFired:    map[int64]time.Time{},
 		suppressed:   map[int64]int64{},
+		ledgerHashes: map[uint32]string{},
 	}
+}
+
+// ListChannelsForMonitor and RecordDeliveryAttempt satisfy the dispatcher's
+// store interface so tracing tests can run real deliveries in memory.
+func (f *fakeStore) ListChannelsForMonitor(_ context.Context, monitorID int64) ([]store.Channel, error) {
+	var out []store.Channel
+	for _, id := range f.attached[monitorID] {
+		for _, ch := range f.channels {
+			if ch.ID == id {
+				out = append(out, ch)
+			}
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) RecordDeliveryAttempt(_ context.Context, d *store.DeliveryAttempt) error {
+	d.ID = int64(len(f.attempts) + 1)
+	f.attempts = append(f.attempts, *d)
+	return nil
+}
+
+// ListChannels satisfies the digest half of the dispatcher's store
+// interface; the poller tests never exercise digest flushing.
+func (f *fakeStore) ListChannels(_ context.Context, enabledOnly bool) ([]store.Channel, error) {
+	var out []store.Channel
+	for _, ch := range f.channels {
+		if !enabledOnly || ch.Enabled {
+			out = append(out, ch)
+		}
+	}
+	return out, nil
 }
 
 func (f *fakeStore) ListMonitors(_ context.Context, enabledOnly bool) ([]store.Monitor, error) {
