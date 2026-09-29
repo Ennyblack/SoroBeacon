@@ -201,7 +201,7 @@ func New(st store.Store, reg *rules.Registry, f *notify.Factory, log *slog.Logge
 		pages:       map[string]*template.Template{},
 		silentAfter: 24 * time.Hour,
 	}
-	for _, page := range []string{"index", "monitors", "monitor", "channels", "channel-delete", "alerts", "alert", "maintenance", "login", "error", "rulebuilder", "searches"} {
+	for _, page := range []string{"index", "monitors", "monitor", "channels", "channel-delete", "deadletters", "alerts", "alert", "maintenance", "login", "error", "rulebuilder", "searches"} {
 		t, err := template.New("layout.html").Funcs(templateFuncs).ParseFS(templatesFS, "templates/layout.html", "templates/shortcuts.html", "templates/"+page+".html")
 		if err != nil {
 			return nil, fmt.Errorf("parse template %s: %w", page, err)
@@ -312,6 +312,9 @@ func (s *Server) Routes() chi.Router {
 	r.Get("/maintenance", s.maintenance)
 	r.Post("/maintenance", s.createMaintenance)
 	r.Post("/maintenance/{id}/delete", s.deleteMaintenance)
+
+	r.Get("/dead-letters", s.deadLetters)
+	r.Post("/dead-letters/{id}/redrive", s.redriveDeadLetter)
 	r.NotFound(s.notFound)
 	return r
 }
@@ -325,6 +328,7 @@ var navSection = map[string]string{
 	"monitors":    "monitors",
 	"monitor":     "monitors",
 	"channels":    "channels",
+	"deadletters": "dead-letters",
 	"alerts":      "alerts",
 	"alert":       "alerts",
 	"maintenance": "maintenance",
@@ -1146,6 +1150,87 @@ type maintenanceRow struct {
 // maintenance lists active and upcoming windows. Past windows are omitted:
 // the page is a control surface for what is silencing alerts now and what
 // is about to, not a history of every window ever created.
+func (s *Server) deadLetters(w http.ResponseWriter, r *http.Request) {
+	dlList, err := s.store.ListDeadLetters(r.Context(), store.DeadLetterFilter{Limit: 100})
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	monitors, err := s.store.ListMonitors(r.Context(), false)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	channels, err := s.store.ListChannels(r.Context(), false)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	mNames := map[int64]string{}
+	for _, m := range monitors {
+		mNames[m.ID] = m.Name
+	}
+	cNames := map[int64]string{}
+	for _, c := range channels {
+		cNames[c.ID] = c.Name
+	}
+	type dlView struct {
+		store.DeadLetter
+		MonitorName string
+		ChannelName string
+	}
+	var views []dlView
+	for _, dl := range dlList {
+		mName := fmt.Sprintf("#%d", dl.AlertID)
+		if alert, err := s.store.GetAlert(r.Context(), dl.AlertID); err == nil {
+			if name, ok := mNames[alert.MonitorID]; ok {
+				mName = name
+			}
+		}
+		cName := cNames[dl.ChannelID]
+		if cName == "" {
+			cName = fmt.Sprintf("Channel #%d", dl.ChannelID)
+		}
+		views = append(views, dlView{
+			DeadLetter:  dl,
+			MonitorName: mName,
+			ChannelName: cName,
+		})
+	}
+	s.render(w, r, "deadletters", map[string]any{
+		"Title":       "Dead-Letter Queue",
+		"DeadLetters": views,
+	})
+}
+
+func (s *Server) redriveDeadLetter(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r, "id")
+	if err != nil {
+		s.notFound(w, r)
+		return
+	}
+	dl, err := s.store.GetDeadLetter(r.Context(), id)
+	if err != nil {
+		s.notFound(w, r)
+		return
+	}
+	alert, err := s.store.GetAlert(r.Context(), dl.AlertID)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	channel, err := s.store.GetChannel(r.Context(), dl.ChannelID)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	err = s.factory.Deliver(r.Context(), *alert, *channel)
+	if err == nil {
+		_ = s.store.DeleteDeadLetter(r.Context(), id)
+	}
+	http.Redirect(w, r, "/dead-letters", http.StatusSeeOther)
+}
+
 func (s *Server) maintenance(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	active, err := s.store.ListMaintenanceWindows(r.Context(), store.MaintenanceWindowFilter{Active: true, At: now, Limit: 100})

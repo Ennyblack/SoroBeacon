@@ -1,6 +1,7 @@
 package store
 
 import (
+	"strconv"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -53,6 +54,128 @@ type SQLite struct {
 }
 
 var _ Store = (*SQLite)(nil)
+
+func (s *SQLite) RecordDeadLetter(ctx context.Context, dl *DeadLetter) error {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	at := dl.CreatedAt
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	query := `INSERT INTO dead_letters (alert_id, channel_id, last_error, attempt_count, last_status, created_at) VALUES (?, ?, ?, ?, ?, ?)`
+	res, err := tx.ExecContext(ctx, query, dl.AlertID, dl.ChannelID, dl.LastError, dl.AttemptCount, dl.LastStatus, at.Format(sqliteTimeLayout))
+	if err != nil {
+		return fmt.Errorf("insert dead letter: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return fmt.Errorf("last insert id: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	dl.ID = id
+	dl.CreatedAt = at
+	return nil
+}
+
+func (s *SQLite) ListDeadLetters(ctx context.Context, f DeadLetterFilter) ([]DeadLetter, error) {
+	var sb strings.Builder
+	sb.WriteString(`SELECT d.id, d.alert_id, d.channel_id, d.last_error, d.attempt_count, d.last_status, d.created_at FROM dead_letters d `)
+	if f.MonitorID != nil {
+		sb.WriteString(`JOIN alerts a ON d.alert_id = a.id `)
+	}
+	sb.WriteString(`WHERE 1=1 `)
+	args := []any{}
+	if f.MonitorID != nil {
+		sb.WriteString(`AND a.monitor_id = ? `)
+		args = append(args, *f.MonitorID)
+	}
+	if f.ChannelID != nil {
+		sb.WriteString(`AND d.channel_id = ? `)
+		args = append(args, *f.ChannelID)
+	}
+	if f.Cursor != "" {
+		cursorID, err := strconv.ParseInt(f.Cursor, 10, 64)
+		if err == nil {
+			sb.WriteString(`AND d.id < ? `)
+			args = append(args, cursorID)
+	}
+	}
+	sb.WriteString(`ORDER BY d.id DESC `)
+	limit := f.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	sb.WriteString(`LIMIT ?`)
+	args = append(args, limit+1)
+
+	rows, err := s.db.QueryContext(ctx, sb.String(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("list dead letters sqlite: %w", err)
+	}
+	defer rows.Close()
+
+	var res []DeadLetter
+	for rows.Next() {
+		var dl DeadLetter
+		var timeStr string
+		if err := rows.Scan(&dl.ID, &dl.AlertID, &dl.ChannelID, &dl.LastError, &dl.AttemptCount, &dl.LastStatus, &timeStr); err != nil {
+			return nil, fmt.Errorf("scan dead letter sqlite: %w", err)
+		}
+		t, err := time.Parse(sqliteTimeLayout, timeStr)
+		if err == nil {
+			dl.CreatedAt = t.UTC()
+		}
+		res = append(res, dl)
+	}
+	return res, nil
+}
+
+func (s *SQLite) GetDeadLetter(ctx context.Context, id int64) (*DeadLetter, error) {
+	query := `SELECT id, alert_id, channel_id, last_error, attempt_count, last_status, created_at FROM dead_letters WHERE id = ?`
+	var dl DeadLetter
+	var timeStr string
+	err := s.db.QueryRowContext(ctx, query, id).Scan(&dl.ID, &dl.AlertID, &dl.ChannelID, &dl.LastError, &dl.AttemptCount, &dl.LastStatus, &timeStr)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get dead letter sqlite: %w", err)
+	}
+	t, err := time.Parse(sqliteTimeLayout, timeStr)
+	if err == nil {
+		dl.CreatedAt = t.UTC()
+	}
+	return &dl, nil
+}
+
+func (s *SQLite) DeleteDeadLetter(ctx context.Context, id int64) error {
+	query := `DELETE FROM dead_letters WHERE id = ?`
+	_, err := s.db.ExecContext(ctx, query, id)
+	if err != nil {
+		return fmt.Errorf("delete dead letter sqlite: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLite) PruneDeadLetters(ctx context.Context, before time.Time) (int64, error) {
+	query := `DELETE FROM dead_letters WHERE created_at < ?`
+	res, err := s.db.ExecContext(ctx, query, before.UTC().Format(sqliteTimeLayout))
+	if err != nil {
+		return 0, fmt.Errorf("prune dead letters sqlite: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("prune dead letters rows affected: %w", err)
+	}
+	return n, nil
+}
+
 
 // WithConfigCipher sets the cipher used to encrypt Channel.Config at rest and
 // returns the store for chaining. A nil cipher (or never calling it) stores

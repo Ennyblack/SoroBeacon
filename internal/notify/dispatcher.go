@@ -58,6 +58,7 @@ type DispatchStore interface {
 	ActiveMaintenanceWindow(ctx context.Context, monitorID int64, contractID string, at time.Time) (*store.MaintenanceWindow, error)
 	// SetAlertSuppressed records why an alert was not delivered.
 	SetAlertSuppressed(ctx context.Context, alertID int64, reason string) error
+	CreateDeadLetter(ctx context.Context, d *store.DeadLetter) error
 }
 
 // Dispatcher fans an alert out to its monitor's channels, retrying each
@@ -451,6 +452,18 @@ func (d *Dispatcher) deliver(ctx context.Context, a Alert, ch store.Channel) {
 		}
 
 		if attempt >= d.MaxAttempts || ctx.Err() != nil || cb.State() == StateOpen {
+			dl := &store.DeadLetter{
+				AlertID:        a.ID,
+				ChannelID:      ch.ID,
+				FinalError:     safeErr.Error(),
+				AttemptCount:   attempt,
+				LastStatusCode: "",
+			}
+			if errStore := d.store.CreateDeadLetter(ctx, dl); errStore != nil {
+				d.log.Error("create dead letter", "alert_id", a.ID, "channel_id", ch.ID, "err", errStore)
+			} else if d.metrics != nil {
+				d.metrics.RecordDeadLetter(ch.Type)
+			}
 			return
 		}
 		select {

@@ -39,6 +39,7 @@ type Metrics struct {
 	alertsFired    prometheus.Counter
 	deliveries     *prometheus.CounterVec
 	throttles      *prometheus.CounterVec
+	deadLetters    *prometheus.CounterVec
 	httpDuration   *prometheus.HistogramVec
 	lastPollAgoSec prometheus.Gauge
 	breakerStates  *prometheus.GaugeVec
@@ -110,6 +111,11 @@ func New() *Metrics {
 			Help: "Alert deliveries, by channel type and outcome (ok|error).",
 		}, []string{"channel", "outcome"}),
 
+		deadLetters: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "sorobeacon_dead_letters_total",
+			Help: "Permanently failed alert deliveries routed to dead-letter queue, by channel type.",
+		}, []string{"channel"}),
+
 		throttles: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "sorobeacon_alert_throttles_total",
 			Help: "Throttled alert delivery attempts, by channel type.",
@@ -152,6 +158,7 @@ func New() *Metrics {
 	}
 	m.registry.MustRegister(m.pollsTotal, m.pollDuration, m.pollLagLedger,
 		m.eventsScanned, m.eventsMatched, m.alertsFired, m.deliveries, m.throttles,
+		m.deadLetters,
 		m.httpDuration, m.lastPollAgoSec, m.pollPriorityContracts, m.pollPriorityLag,
 		m.reorgsTotal, m.lastReorgLedger, m.breakerStates,
 		m.storeReads, m.storeFallbacks, m.replicaEnabled)

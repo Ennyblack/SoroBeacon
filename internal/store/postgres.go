@@ -1,6 +1,7 @@
 package store
 
 import (
+	"strconv"
 	"context"
 	"encoding/json"
 	"errors"
@@ -37,7 +38,7 @@ type PoolSettings struct {
 	// the primary.
 	//
 	// It rides in this struct rather than a constructor argument because
-	// store.New already threads PoolSettings from config to the Postgres
+	// New already threads PoolSettings from config to the Postgres
 	// backend, and a replica URL is pool selection in exactly the same sense
 	// the primary's own URL is.
 	ReplicaURL string
@@ -72,6 +73,111 @@ func (p *Postgres) WithTelemetry(t *telemetry.Provider) *Postgres {
 }
 
 var _ Store = (*Postgres)(nil)
+
+func (p *Postgres) RecordDeadLetter(ctx context.Context, dl *DeadLetter) error {
+	query := `INSERT INTO dead_letters (alert_id, channel_id, last_error, attempt_count, last_status, created_at) VALUES ($1, $2, $3, $4, $5, COALESCE($6, NOW())) RETURNING id, created_at`
+	var t time.Time
+	var id int64
+	err := p.pool.QueryRow(ctx, query, dl.AlertID, dl.ChannelID, dl.LastError, dl.AttemptCount, dl.LastStatus, nilIfZero(dl.CreatedAt)).Scan(&id, &t)
+	if err != nil {
+		return fmt.Errorf("record dead letter: %w", err)
+	}
+	dl.ID = id
+	dl.CreatedAt = t
+	return nil
+}
+
+func (p *Postgres) ListDeadLetters(ctx context.Context, f DeadLetterFilter) ([]DeadLetter, error) {
+	var sb strings.Builder
+	sb.WriteString(`SELECT d.id, d.alert_id, d.channel_id, d.last_error, d.attempt_count, d.last_status, d.created_at FROM dead_letters d `)
+	if f.MonitorID != nil {
+		sb.WriteString(`JOIN alerts a ON d.alert_id = a.id `)
+	}
+	sb.WriteString(`WHERE 1=1 `)
+	args := []any{}
+	argCount := 0
+	if f.MonitorID != nil {
+		argCount++
+		sb.WriteString(fmt.Sprintf(`AND a.monitor_id = $%d `, argCount))
+		args = append(args, *f.MonitorID)
+	}
+	if f.ChannelID != nil {
+		argCount++
+		sb.WriteString(fmt.Sprintf(`AND d.channel_id = $%d `, argCount))
+		args = append(args, *f.ChannelID)
+	}
+	if f.Cursor != "" {
+		cursorID, err := strconv.ParseInt(f.Cursor, 10, 64)
+		if err == nil {
+			argCount++
+			sb.WriteString(fmt.Sprintf(`AND d.id < $%d `, argCount))
+			args = append(args, cursorID)
+		}
+	}
+	sb.WriteString(`ORDER BY d.id DESC `)
+	limit := f.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	argCount++
+	sb.WriteString(fmt.Sprintf(`LIMIT $%d`, argCount))
+	args = append(args, limit+1)
+
+	rows, err := p.pool.Query(ctx, sb.String(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("list dead letters: %w", err)
+	}
+	defer rows.Close()
+
+	var res []DeadLetter
+	for rows.Next() {
+		var dl DeadLetter
+		if err := rows.Scan(&dl.ID, &dl.AlertID, &dl.ChannelID, &dl.LastError, &dl.AttemptCount, &dl.LastStatus, &dl.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan dead letter: %w", err)
+		}
+		res = append(res, dl)
+	}
+	return res, nil
+}
+
+func (p *Postgres) GetDeadLetter(ctx context.Context, id int64) (*DeadLetter, error) {
+	query := `SELECT id, alert_id, channel_id, last_error, attempt_count, last_status, created_at FROM dead_letters WHERE id = $1`
+	var dl DeadLetter
+	err := p.pool.QueryRow(ctx, query, id).Scan(&dl.ID, &dl.AlertID, &dl.ChannelID, &dl.LastError, &dl.AttemptCount, &dl.LastStatus, &dl.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get dead letter: %w", err)
+	}
+	return &dl, nil
+}
+
+func (p *Postgres) DeleteDeadLetter(ctx context.Context, id int64) error {
+	query := `DELETE FROM dead_letters WHERE id = $1`
+	_, err := p.pool.Exec(ctx, query, id)
+	if err != nil {
+		return fmt.Errorf("delete dead letter: %w", err)
+	}
+	return nil
+}
+
+func (p *Postgres) PruneDeadLetters(ctx context.Context, before time.Time) (int64, error) {
+	query := `DELETE FROM dead_letters WHERE created_at < $1`
+	tag, err := p.pool.Exec(ctx, query, before)
+	if err != nil {
+		return 0, fmt.Errorf("prune dead letters: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+func nilIfZero(t time.Time) any {
+	if t.IsZero() {
+		return nil
+	}
+	return t
+}
+
 
 // WithConfigCipher sets the cipher used to encrypt Channel.Config at rest
 // and returns the store for chaining. Call it before serving traffic; a nil
@@ -695,7 +801,7 @@ func (p *Postgres) scanChannel(row pgx.CollectableRow) (Channel, error) {
 
 // --- alerts ---
 
-// CreateAlert wraps the transaction with the store.create_alert span, so
+// CreateAlert wraps the transaction with the create_alert span, so
 // the "was it the database write?" half of the slow-alert question has a
 // timeline. The outcome (created | duplicate | suppressed) is an attribute,
 // turning the dedup and cooldown gates into something visible per trace.

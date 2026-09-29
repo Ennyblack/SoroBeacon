@@ -1,0 +1,26 @@
+{{define "content"}}
+<p class="muted"><a href="/">← Overview</a></p>
+<h1>Dead-Letter Queue</h1>
+{{if .DeadLetters}}
+<table>
+  <tr><th>ID</th><th>Alert</th><th>Channel</th><th>Attempts</th><th>Last Error</th><th>At</th><th>Action</th></tr>
+  {{range .DeadLetters}}
+  <tr>
+    <td>{{.ID}}</td>
+    <td><a href="/alerts/{{.AlertID}}">#{{.AlertID}}</a> ({{.MonitorName}})</td>
+    <td>{{.ChannelName}}</td>
+    <td>{{.AttemptCount}}</td>
+    <td><code>{{.LastError}}</code></td>
+    <td>{{formatTime .CreatedAt $.Timezone}}</td>
+    <td>
+      <form method="POST" action="/dead-letters/{{.ID}}/redrive" style="display:inline;">
+        <button type="submit" class="button">Re-drive</button>
+      </form>
+    </td>
+  </tr>
+  {{end}}
+</table>
+{{else}}
+<p class="muted">No dead-letter items found.</p>
+{{end}}
+{{end}}
