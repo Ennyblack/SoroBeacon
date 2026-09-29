@@ -28,6 +28,10 @@ func (n *scriptedNotifier) Send(_ context.Context, _ Alert) error {
 	return err
 }
 
+func (f *fakeDispatchStore) CreateDeadLetter(_ context.Context, _ *store.DeadLetter) error {
+	return nil
+}
+
 type panicNotifier struct {
 	secret string
 }

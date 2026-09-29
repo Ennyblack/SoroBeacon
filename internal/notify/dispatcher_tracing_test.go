@@ -1,7 +1,7 @@
 package notify
 
 // Tracing tests for the dispatcher. In production Dispatch is handed the
-// poller's alert-span context, so the notify.deliver span lands under the
+// poller's alert-span context, so the deliver span lands under the
 // alert's span on the poll cycle's trace; these tests re-create that shape
 // with an in-memory exporter and pin the attributes and the no-secrets
 // rule on the span itself.
@@ -64,6 +64,10 @@ func TestDeliverSpanIsChildOfAlertContext(t *testing.T) {
 }
 
 // findSpan picks the first span with the given name from a batch of ended spans.
+func (f *fakeDispatchStore) CreateDeadLetter(_ context.Context, _ *store.DeadLetter) error {
+	return nil
+}
+
 func findSpan(spans []sdktrace.ReadOnlySpan, name string) sdktrace.ReadOnlySpan {
 	for _, s := range spans {
 		if s.Name() == name {

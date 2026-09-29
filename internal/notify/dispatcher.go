@@ -453,16 +453,14 @@ func (d *Dispatcher) deliver(ctx context.Context, a Alert, ch store.Channel) {
 
 		if attempt >= d.MaxAttempts || ctx.Err() != nil || cb.State() == StateOpen {
 			dl := &store.DeadLetter{
-				AlertID:        a.ID,
-				ChannelID:      ch.ID,
-				FinalError:     safeErr.Error(),
-				AttemptCount:   attempt,
-				LastStatusCode: "",
+				AlertID:      a.ID,
+				ChannelID:    ch.ID,
+				LastError:    safeErr.Error(),
+				AttemptCount: attempt,
+				LastStatus:   0,
 			}
 			if errStore := d.store.CreateDeadLetter(ctx, dl); errStore != nil {
 				d.log.Error("create dead letter", "alert_id", a.ID, "channel_id", ch.ID, "err", errStore)
-			} else if d.metrics != nil {
-				d.metrics.RecordDeadLetter(ch.Type)
 			}
 			return
 		}

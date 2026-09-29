@@ -90,6 +90,10 @@ func (f *fakeDispatchStore) MarkAlertInhibited(_ context.Context, alertID, sourc
 	return nil
 }
 
+func (f *fakeDispatchStore) CreateDeadLetter(_ context.Context, _ *store.DeadLetter) error {
+	return nil
+}
+
 func newTestDispatcher(t *testing.T, st *fakeDispatchStore, n Notifier) *Dispatcher {
 	t.Helper()
 	f := &Factory{constructors: map[string]Constructor{}}
